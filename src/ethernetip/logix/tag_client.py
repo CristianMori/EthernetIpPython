@@ -38,6 +38,14 @@ class TagClient:
         self._lock = asyncio.Lock()
         self.session_handle: int = 0
         self._last_header: EncapsulationHeader | None = None
+        # Instance-ID cache populated by browse_tags(). When a root tag is in
+        # the cache, build_tag_path() emits a 6-byte logical Symbol Object
+        # segment (class 0x6B + instance) instead of the longer ANSI symbolic
+        # segment. Logix accepts this form for the controller-scope leaf and
+        # for the in-program tag root (but NOT for the "Program:Foo" prefix
+        # itself — that has to stay symbolic on the wire).
+        self._controller_atoms: dict[str, int] = {}            # name -> inst
+        self._program_atoms: dict[tuple[str, str], int] = {}    # (prog, name) -> inst
 
     @property
     def is_connected(self) -> bool:
@@ -76,9 +84,68 @@ class TagClient:
 
     # --- Read operations ---
 
+    def _build_tag_path(self, name: str) -> bytes:
+        """Cache-aware Logix tag path builder.
+
+        When the root tag is in the instance-ID cache, emit a 6-byte logical
+        Symbol Object segment (Class 0x6B + 16-bit Instance) instead of the
+        longer ANSI symbolic segment. Saves wire bytes per request and is
+        cheaper on the CPU since there's no string parse.
+
+        Three cases:
+          1. Controller-scope root in cache (e.g. "rate", "RegularTest:I"):
+             INST(id) + (symbolic+element for any struct/array suffix).
+          2. Program-scope root in cache (e.g. "Program:MainProgram.Framework"):
+             sym("Program:MainProgram") + INST(id) + (suffix).
+             (Logix rejects INST for the "Program:Foo" piece itself, so it
+             stays symbolic.)
+          3. Cache miss: fall back to all-symbolic via _build_symbolic_path.
+        """
+        parts = name.split('.')
+        head = parts[0]
+        head_base, head_brackets = _split_brackets(head)
+
+        # ---- (2) program-scope drilling ----
+        if (head_base.startswith("Program:") and len(parts) >= 2):
+            leaf = parts[1]
+            leaf_base, leaf_brackets = _split_brackets(leaf)
+            key = (head_base, leaf_base)
+            if key in self._program_atoms:
+                inst = self._program_atoms[key]
+                out = _encode_symbolic(head_base)
+                for grp in head_brackets:
+                    for idx in grp: out += _encode_element(idx)
+                out += _encode_symbol_instance(inst)
+                for grp in leaf_brackets:
+                    for idx in grp: out += _encode_element(idx)
+                for piece in parts[2:]:
+                    pb, pi = _split_brackets(piece)
+                    if pb: out += _encode_symbolic(pb)
+                    for grp in pi:
+                        for idx in grp: out += _encode_element(idx)
+                return out
+            # leaf not in cache — keep program prefix but symbolic for rest
+            return _build_symbolic_path(name)
+
+        # ---- (1) controller-scope root ----
+        if head_base in self._controller_atoms:
+            inst = self._controller_atoms[head_base]
+            out = _encode_symbol_instance(inst)
+            for grp in head_brackets:
+                for idx in grp: out += _encode_element(idx)
+            for piece in parts[1:]:
+                pb, pi = _split_brackets(piece)
+                if pb: out += _encode_symbolic(pb)
+                for grp in pi:
+                    for idx in grp: out += _encode_element(idx)
+            return out
+
+        # ---- (3) cache miss ----
+        return _build_symbolic_path(name)
+
     async def read_tag_raw(self, tag_name: str, element_count: int = 1) -> bytes:
         """Read a tag and return raw response (tag_type + data bytes)."""
-        path = _build_symbolic_path(tag_name)
+        path = self._build_tag_path(tag_name)
         req_data = struct.pack('<H', element_count)
         return await self._send_cip(0x4C, path, req_data)
 
@@ -120,7 +187,7 @@ class TagClient:
 
     async def read_struct(self, tag_name: str, template: TemplateInfo) -> StructureValue:
         """Read a structure tag using fragmented reads for large structures."""
-        path = _build_symbolic_path(tag_name)
+        path = self._build_tag_path(tag_name)
         all_data = bytearray()
         byte_offset = 0
         tag_type_header = b''
@@ -149,37 +216,37 @@ class TagClient:
     # --- Write operations ---
 
     async def write_dint(self, tag_name: str, value: int) -> None:
-        path = _build_symbolic_path(tag_name)
+        path = self._build_tag_path(tag_name)
         data = struct.pack('<HHi', dt.DINT, 1, value)
         await self._send_cip(0x4D, path, data)
 
     async def write_real(self, tag_name: str, value: float) -> None:
-        path = _build_symbolic_path(tag_name)
+        path = self._build_tag_path(tag_name)
         data = struct.pack('<HHf', dt.REAL, 1, value)
         await self._send_cip(0x4D, path, data)
 
     async def write_int(self, tag_name: str, value: int) -> None:
-        path = _build_symbolic_path(tag_name)
+        path = self._build_tag_path(tag_name)
         data = struct.pack('<HHh', dt.INT, 1, value)
         await self._send_cip(0x4D, path, data)
 
     async def write_sint(self, tag_name: str, value: int) -> None:
-        path = _build_symbolic_path(tag_name)
+        path = self._build_tag_path(tag_name)
         data = struct.pack('<HHb', dt.SINT, 1, value)
         await self._send_cip(0x4D, path, data)
 
     async def write_lint(self, tag_name: str, value: int) -> None:
-        path = _build_symbolic_path(tag_name)
+        path = self._build_tag_path(tag_name)
         data = struct.pack('<HHq', dt.LINT, 1, value)
         await self._send_cip(0x4D, path, data)
 
     async def write_lreal(self, tag_name: str, value: float) -> None:
-        path = _build_symbolic_path(tag_name)
+        path = self._build_tag_path(tag_name)
         data = struct.pack('<HHd', dt.LREAL, 1, value)
         await self._send_cip(0x4D, path, data)
 
     async def write_raw(self, tag_name: str, tag_type: int, element_count: int, value: bytes) -> None:
-        path = _build_symbolic_path(tag_name)
+        path = self._build_tag_path(tag_name)
         data = struct.pack('<HH', tag_type, element_count) + value
         await self._send_cip(0x4D, path, data)
 
@@ -195,7 +262,7 @@ class TagClient:
     async def write_struct(self, tag_name: str, structure_handle: int,
                            element_count: int, value: bytes) -> None:
         """Write a structure tag (uses 0x02A0 + struct_handle tag type)."""
-        path = _build_symbolic_path(tag_name)
+        path = self._build_tag_path(tag_name)
         data = struct.pack('<HHH', 0x02A0, structure_handle, element_count) + value
         await self._send_cip(0x4D, path, data)
 
@@ -211,7 +278,7 @@ class TagClient:
 
         sub_requests = []
         for name in tag_names:
-            path = _build_symbolic_path(name)
+            path = self._build_tag_path(name)
             req_data = b'\x01\x00'  # 1 element
             mr = bytes([0x4C, len(path) // 2]) + path + req_data
             sub_requests.append(mr)
@@ -233,7 +300,7 @@ class TagClient:
 
         sub_requests = []
         for name, tag_type, value in writes:
-            path = _build_symbolic_path(name)
+            path = self._build_tag_path(name)
             write_data = struct.pack('<HH', tag_type, 1) + value
             mr = bytes([0x4D, len(path) // 2]) + path + write_data
             sub_requests.append(mr)
@@ -249,13 +316,31 @@ class TagClient:
     # --- Browse and template ---
 
     async def browse_tags(self) -> TagBrowseResult:
-        """Browse all tags (controller + program scope) and resolve templates."""
+        """Browse all tags (controller + program scope) and resolve templates.
+
+        Side effect: populates the instance-ID caches consulted by
+        build_tag_path(). Programs themselves are system tags at controller
+        scope (sym bit 0x1000) but they're enumerated here so we can drill
+        into them for program-scope browsing.
+        """
         tags = await self._browse_symbols(None)
 
-        programs = [t.name for t in tags if t.name.startswith("Program:") and '.' not in t.name]
+        # Cache controller-scope user tags (non-system, non-__ prefixed).
+        for t in tags:
+            if t.is_system or t.name.startswith("__"):
+                continue
+            self._controller_atoms[t.name] = t.instance_id
+
+        # Programs appear at controller scope with sym bit 0x1000 set and
+        # name "Program:<X>". The earlier filter strips them as system tags,
+        # so list them directly out of the raw browse.
+        programs = [t.name for t in tags
+                    if t.name.startswith("Program:") and '.' not in t.name]
         for program in programs:
             ptags = await self._browse_symbols(program)
             for t in ptags:
+                if not t.name.startswith("__"):
+                    self._program_atoms[(program, t.name)] = t.instance_id
                 t.name = f"{program}.{t.name}"
             tags.extend(ptags)
 
@@ -507,16 +592,60 @@ class TagClient:
             return resp_payload
 
 
-def _build_symbolic_path(name: str) -> bytes:
-    """Build a Logix tag path with ANSI Extended Symbolic segments (0x91) and
-    Logical Element segments (0x28/0x29/0x2A) for array indices.
+def _split_brackets(piece: str) -> tuple[str, list[list[int]]]:
+    """Split a tag piece into (base_name, list_of_index_groups).
 
-    Splits on '.' (struct member access). For each dotted piece, peels any
-    trailing '[...]' bracket and emits a symbolic segment for the base name
-    followed by one element segment per comma-separated index. Studio 5000
-    multi-dim arrays (arr[1,2,3]) emit three element segments after the
-    symbolic; chained-bracket syntax (arr[1][2][3]) is also accepted and
-    produces the same wire encoding.
+    Each index group is the comma-separated list inside one [...] pair.
+    Returns ([], []) when no bracket suffix is found. If a bracket can't be
+    parsed as integers, it's left attached to the base name (caller will
+    treat the whole piece as a symbolic segment).
+    """
+    bracket_groups: list[list[int]] = []
+    base = piece
+    while base.endswith(']'):
+        open_idx = base.rfind('[')
+        if open_idx < 0:
+            break
+        inside = base[open_idx + 1:-1]
+        try:
+            indices = [int(x.strip(), 0) for x in inside.split(',')]
+        except ValueError:
+            break
+        bracket_groups.append(indices)
+        base = base[:open_idx]
+    bracket_groups.reverse()       # back to source order
+    return base, bracket_groups
+
+
+def _encode_symbolic(part: str) -> bytes:
+    b = part.encode('ascii')
+    pad = b'\x00' if len(b) % 2 else b''
+    return bytes([0x91, len(b)]) + b + pad
+
+
+def _encode_element(v: int) -> bytes:
+    if v <= 0xFF:
+        return bytes([0x28, v])
+    if v <= 0xFFFF:
+        return bytes([0x29, 0x00, v & 0xFF, (v >> 8) & 0xFF])
+    return bytes([0x2A, 0x00,
+                  v & 0xFF, (v >> 8) & 0xFF,
+                  (v >> 16) & 0xFF, (v >> 24) & 0xFF])
+
+
+def _encode_symbol_instance(inst: int) -> bytes:
+    # Logical: Class 0x6B (Symbol Object), 16-bit Instance.
+    return bytes([0x20, 0x6B, 0x25, 0x00, inst & 0xFF, (inst >> 8) & 0xFF])
+
+
+def _build_symbolic_path(name: str) -> bytes:
+    """Build a Logix tag path using only ANSI symbolic + element segments.
+
+    No instance-ID optimization — every dotted piece becomes a symbolic
+    segment (0x91 + len + chars + pad) followed by element segments (0x28 /
+    0x29 / 0x2A) for any bracket indices. This is the wire form Logix has
+    always accepted; callers without a populated instance-ID cache use it
+    as the fallback.
 
     Examples:
         rate                       -> sym("rate")
@@ -526,48 +655,13 @@ def _build_symbolic_path(name: str) -> bytes:
         arr[1,2,3]                 -> sym("arr") + elem(1) + elem(2) + elem(3)
     """
     out = bytearray()
-
-    def emit_symbolic(part: str) -> None:
-        b = part.encode('ascii')
-        out.append(0x91)
-        out.append(len(b))
-        out.extend(b)
-        if len(b) % 2 != 0:
-            out.append(0)
-
-    def emit_element(v: int) -> None:
-        if v <= 0xFF:
-            out.extend(bytes([0x28, v]))
-        elif v <= 0xFFFF:
-            out.extend(bytes([0x29, 0x00, v & 0xFF, (v >> 8) & 0xFF]))
-        else:
-            out.extend(bytes([0x2A, 0x00,
-                              v & 0xFF, (v >> 8) & 0xFF,
-                              (v >> 16) & 0xFF, (v >> 24) & 0xFF]))
-
     for piece in name.split('.'):
-        # Peel any trailing "[...][...]..." bracket groups from this piece.
-        bracket_groups: list[list[int]] = []
-        base = piece
-        while base.endswith(']'):
-            open_idx = base.rfind('[')
-            if open_idx < 0:
-                break
-            inside = base[open_idx + 1:-1]
-            try:
-                indices = [int(x.strip(), 0) for x in inside.split(',')]
-            except ValueError:
-                # Not numeric — leave the bracket as part of the symbolic name.
-                break
-            bracket_groups.append(indices)
-            base = base[:open_idx]
+        base, brackets = _split_brackets(piece)
         if base:
-            emit_symbolic(base)
-        # bracket_groups was filled right-to-left; emit in source order.
-        for group in reversed(bracket_groups):
+            out += _encode_symbolic(base)
+        for group in brackets:
             for idx in group:
-                emit_element(idx)
-
+                out += _encode_element(idx)
     return bytes(out)
 
 
