@@ -508,18 +508,67 @@ class TagClient:
 
 
 def _build_symbolic_path(name: str) -> bytes:
-    """Build ANSI Extended Symbolic path. Splits dotted names into separate segments."""
-    parts = name.split('.')
-    segments = []
-    for part in parts:
-        part_bytes = part.encode('ascii')
-        padded = len(part_bytes) if len(part_bytes) % 2 == 0 else len(part_bytes) + 1
-        seg = bytearray(2 + padded)
-        seg[0] = 0x91
-        seg[1] = len(part_bytes)
-        seg[2:2 + len(part_bytes)] = part_bytes
-        segments.append(bytes(seg))
-    return b''.join(segments)
+    """Build a Logix tag path with ANSI Extended Symbolic segments (0x91) and
+    Logical Element segments (0x28/0x29/0x2A) for array indices.
+
+    Splits on '.' (struct member access). For each dotted piece, peels any
+    trailing '[...]' bracket and emits a symbolic segment for the base name
+    followed by one element segment per comma-separated index. Studio 5000
+    multi-dim arrays (arr[1,2,3]) emit three element segments after the
+    symbolic; chained-bracket syntax (arr[1][2][3]) is also accepted and
+    produces the same wire encoding.
+
+    Examples:
+        rate                       -> sym("rate")
+        counts[3]                  -> sym("counts") + elem(3)
+        Temp[10].AnotherArray[4]   -> sym("Temp") + elem(10)
+                                       + sym("AnotherArray") + elem(4)
+        arr[1,2,3]                 -> sym("arr") + elem(1) + elem(2) + elem(3)
+    """
+    out = bytearray()
+
+    def emit_symbolic(part: str) -> None:
+        b = part.encode('ascii')
+        out.append(0x91)
+        out.append(len(b))
+        out.extend(b)
+        if len(b) % 2 != 0:
+            out.append(0)
+
+    def emit_element(v: int) -> None:
+        if v <= 0xFF:
+            out.extend(bytes([0x28, v]))
+        elif v <= 0xFFFF:
+            out.extend(bytes([0x29, 0x00, v & 0xFF, (v >> 8) & 0xFF]))
+        else:
+            out.extend(bytes([0x2A, 0x00,
+                              v & 0xFF, (v >> 8) & 0xFF,
+                              (v >> 16) & 0xFF, (v >> 24) & 0xFF]))
+
+    for piece in name.split('.'):
+        # Peel any trailing "[...][...]..." bracket groups from this piece.
+        bracket_groups: list[list[int]] = []
+        base = piece
+        while base.endswith(']'):
+            open_idx = base.rfind('[')
+            if open_idx < 0:
+                break
+            inside = base[open_idx + 1:-1]
+            try:
+                indices = [int(x.strip(), 0) for x in inside.split(',')]
+            except ValueError:
+                # Not numeric — leave the bracket as part of the symbolic name.
+                break
+            bracket_groups.append(indices)
+            base = base[:open_idx]
+        if base:
+            emit_symbolic(base)
+        # bracket_groups was filled right-to-left; emit in source order.
+        for group in reversed(bracket_groups):
+            for idx in group:
+                emit_element(idx)
+
+    return bytes(out)
 
 
 # --- Result types ---
