@@ -31,7 +31,8 @@ class TagClient:
     """Client for reading/writing Logix tags over EtherNet/IP."""
 
     def __init__(self, host: str, port: int = EIP_PORT,
-                  *, path: str | None = None):
+                  *, path: str | None = None,
+                  use_connected: bool = False):
         """Connect to a Logix controller.
 
         host / port — the EtherNet/IP module's IP and TCP port (44818).
@@ -48,10 +49,14 @@ class TagClient:
             Tokens are decimal (0..255) or 0xNN hex; the parser passes the
             bytes through verbatim, even-padded.
 
-        Every CIP request is wrapped in Unconnected_Send (service 0x52)
-        addressed to the Connection Manager (class 0x06, instance 1) so the
-        same code path works whether the route is empty or several hops
-        deep.
+        use_connected — when False (default), every CIP request is sent as
+        an unconnected message (bare MR or Unconnected_Send-wrapped depending
+        on whether `path` was provided). When True, connect() additionally
+        opens a Class 3 connected explicit connection to the destination's
+        Message Router with the `path` route baked into the Forward_Open;
+        subsequent requests ride the connection via SendUnitData with no
+        per-request route bytes. Faster on hot polling loops but adds a
+        Forward_Open/Forward_Close exchange around the session.
         """
         self._host = host
         self._port = port
@@ -71,6 +76,17 @@ class TagClient:
         # Routing path bytes used to walk from the EtherNet/IP module to the
         # CPU. Set from the libplctag-style `path` string passed to __init__.
         self._route_path: bytes = _parse_route_path(path)
+        # Class 3 connected explicit messaging state. _use_connected captures
+        # the constructor flag; the rest is populated by _open_class3() during
+        # connect() and torn down by _close_class3() during disconnect().
+        self._use_connected: bool = use_connected
+        self._oto_t_conn_id: int = 0     # target's chosen O->T id (used when WE send)
+        self._tto_o_conn_id: int = 0     # our chosen T->O id (target sends to us)
+        self._conn_serial: int = 0
+        self._orig_vendor: int = 0x0001
+        self._orig_serial: int = 0
+        self._seq_count: int = 0
+        self._class3_open: bool = False
 
     @property
     def is_connected(self) -> bool:
@@ -79,8 +95,12 @@ class TagClient:
     async def connect(self) -> None:
         self._reader, self._writer = await asyncio.open_connection(self._host, self._port)
         self.session_handle = await self._register_session()
+        if self._use_connected:
+            await self._open_class3()
 
     async def disconnect(self) -> None:
+        if self._class3_open:
+            await self._close_class3()
         if self._writer and self.session_handle:
             try:
                 header = EncapsulationHeader(
@@ -96,6 +116,96 @@ class TagClient:
             self._writer.close()
         self._reader = None
         self._writer = None
+
+    async def _open_class3(self) -> None:
+        """Open a Class 3 connected explicit connection to the destination's
+        Message Router. The Forward_Open's connection_path embeds our route
+        path (Phase B) followed by the Message Router app path, so subsequent
+        SendUnitData traffic reaches the CPU without per-request routing.
+        """
+        import time
+        self._conn_serial = (int(time.monotonic_ns() // 1000) & 0xFFFF) or 1
+        self._orig_serial = int(time.monotonic_ns()) & 0xFFFFFFFF
+        self._tto_o_conn_id = 0x80000000 | self._conn_serial
+        self._seq_count = 0
+
+        # Forward_Open application path: route bytes (if any) + Message Router.
+        app_path = self._route_path + bytes([0x20, 0x02, 0x24, 0x01])
+
+        # Logix-compatible Class 3 connection params (matches pycomm3 / Studio).
+        net_params = 0x43F8        # P2P, priority high, fixed size 504 bytes
+        transport  = 0xA3          # server direction, app trigger, class 3
+        rpi        = 2_500_000     # 2.5 s — Class 3 RPI is just inactivity timeout
+
+        fo = bytearray(36 + len(app_path))
+        struct.pack_into('<BB', fo, 0, 0x07, 0x09)
+        struct.pack_into('<I',  fo, 2, 0)                          # OT id — target picks
+        struct.pack_into('<I',  fo, 6, self._tto_o_conn_id)
+        struct.pack_into('<H',  fo, 10, self._conn_serial)
+        struct.pack_into('<H',  fo, 12, self._orig_vendor)
+        struct.pack_into('<I',  fo, 14, self._orig_serial)
+        fo[18] = 0x03                                              # timeout mult ×32
+        struct.pack_into('<I',  fo, 22, rpi)
+        struct.pack_into('<H',  fo, 26, net_params)
+        struct.pack_into('<I',  fo, 28, rpi)
+        struct.pack_into('<H',  fo, 32, net_params)
+        fo[34] = transport
+        fo[35] = len(app_path) // 2
+        fo[36:36 + len(app_path)] = app_path
+
+        # Forward_Open targets the LOCAL Connection Manager and must go
+        # as BARE MR — not Unconnected_Send-wrapped. The routing happens
+        # at connection-setup time using the connection_path embedded in
+        # the FO body (which we already prefixed with self._route_path).
+        # Temporarily clear both the Class-3 flag (so we don't recurse)
+        # and the route path (so Phase B doesn't add a UCS wrap).
+        was_class3 = self._class3_open
+        saved_route = self._route_path
+        self._class3_open = False
+        self._route_path = b''
+        try:
+            cm_path = bytes([0x20, 0x06, 0x24, 0x01])
+            status, data = await self._send_cip_with_status(0x54, cm_path, bytes(fo))
+            if status != 0:
+                raise RuntimeError(
+                    f"Class 3 Forward_Open failed: status=0x{status:02X} "
+                    f"ext_data={data.hex(' ')}")
+            if len(data) < 8:
+                raise RuntimeError("Class 3 Forward_Open: response too short")
+            self._oto_t_conn_id = struct.unpack_from('<I', data, 0)[0]
+            # data[4:8] echoes our TO id; we already have it.
+        finally:
+            self._class3_open = was_class3
+            self._route_path = saved_route
+        self._class3_open = True
+
+    async def _close_class3(self) -> None:
+        """Send Forward_Close. Best-effort — swallow errors so disconnect()
+        always tears down cleanly. Like Forward_Open this must go to the
+        LOCAL Connection Manager as bare MR (no UCS wrap)."""
+        if not self._class3_open:
+            return
+        self._class3_open = False
+        saved_route = self._route_path
+        self._route_path = b''
+        try:
+            # Forward_Close body: priority/tick + serial + vendor + serial
+            # + connection_path_size + reserved + (route + Message Router).
+            app_path = saved_route + bytes([0x20, 0x02, 0x24, 0x01])
+            close_data = bytearray(12 + len(app_path))
+            struct.pack_into('<BB', close_data, 0, 0x07, 0x09)
+            struct.pack_into('<H',  close_data, 2, self._conn_serial)
+            struct.pack_into('<H',  close_data, 4, self._orig_vendor)
+            struct.pack_into('<I',  close_data, 6, self._orig_serial)
+            close_data[10] = len(app_path) // 2
+            close_data[11] = 0
+            close_data[12:12 + len(app_path)] = app_path
+            cm_path = bytes([0x20, 0x06, 0x24, 0x01])
+            await self._send_cip_with_status(0x4E, cm_path, bytes(close_data))
+        except Exception:
+            pass
+        finally:
+            self._route_path = saved_route
 
     async def close(self) -> None:
         await self.disconnect()
@@ -478,6 +588,13 @@ class TagClient:
         # The actual tag service request — service + path + data.
         inner_mr = mr_codec.encode_request(service_code, cip_path, service_data)
 
+        # Class 3 connected explicit: ride the established connection via
+        # SendUnitData. No route bytes per request (the connection was
+        # opened with the route baked into the Forward_Open's
+        # connection_path), no Unconnected_Send wrap.
+        if self._class3_open:
+            return await self._send_connected(inner_mr)
+
         # Wrap in Unconnected_Send (service 0x52, Connection Manager) ONLY
         # when a route path was configured. The EtherNet/IP module of a
         # ControlLogix chassis won't auto-deliver an empty-route
@@ -522,6 +639,42 @@ class TagClient:
                 return status.general_status, data
 
         raise RuntimeError("No response data")
+
+    async def _send_connected(self, inner_mr: bytes) -> tuple[int, bytes]:
+        """Send an already-encoded MR over the established Class 3 connection
+        via SendUnitData. CPF wraps a ConnectedAddress (0x00A1, our OT id)
+        and a ConnectedData (0x00B1, 2-byte sequence count + MR)."""
+        self._seq_count = (self._seq_count + 1) & 0xFFFF
+        cd = struct.pack('<H', self._seq_count) + inner_mr
+
+        # SendUnitData payload = InterfaceHandle(4) + Timeout(2) + CPF{
+        #   ConnectedAddress(0x00A1) addr_len=4 + OT_conn_id,
+        #   ConnectedData(0x00B1)    data_len   + CD }
+        payload = bytearray(6 + 2 + 4 + 4 + 4 + len(cd))
+        struct.pack_into('<H',   payload, 6, 2)                              # item count
+        struct.pack_into('<HHI', payload, 8, 0x00A1, 4, self._oto_t_conn_id)
+        struct.pack_into('<HH',  payload, 16, 0x00B1, len(cd))
+        payload[20:20 + len(cd)] = cd
+
+        resp = await self._send_encapsulated(EncapsulationCommand.SEND_UNIT_DATA, bytes(payload))
+        if len(resp) < 8:
+            raise RuntimeError("SendUnitData reply too short")
+        offset = 6
+        item_count = struct.unpack_from('<H', resp, offset)[0]; offset += 2
+        for _ in range(item_count):
+            if offset + 4 > len(resp): break
+            type_id, length = struct.unpack_from('<HH', resp, offset); offset += 4
+            if offset + length > len(resp): break
+            if type_id == 0x00B1 and length >= 2:
+                # ConnectedData payload = seq(2) + MR response
+                inner = resp[offset + 2 : offset + length]
+                parsed = mr_codec.try_parse_response(inner)
+                if parsed is None:
+                    raise RuntimeError("Malformed connected MR response")
+                _, status, data = parsed
+                return status.general_status, data
+            offset += length
+        raise RuntimeError("No ConnectedData item in SendUnitData reply")
 
     async def _send_multi_service(self, sub_requests: list[bytes]) -> list[tuple[int, bytes]]:
         header_size = 2 + len(sub_requests) * 2
