@@ -30,7 +30,29 @@ EIP_PORT = 44818
 class TagClient:
     """Client for reading/writing Logix tags over EtherNet/IP."""
 
-    def __init__(self, host: str, port: int = EIP_PORT):
+    def __init__(self, host: str, port: int = EIP_PORT,
+                  *, path: str | None = None):
+        """Connect to a Logix controller.
+
+        host / port — the EtherNet/IP module's IP and TCP port (44818).
+
+        path — libplctag-style comma-separated route path used to walk from
+        the EtherNet/IP module to the CPU. Examples:
+          - None / ""  → no route, request is delivered to whichever CIP
+            object lives in the EtherNet/IP module itself. Works for a
+            CompactLogix or an EN2T+CPU combo where the symbol service
+            object is hosted in the comm module.
+          - "1,0"      → backplane (port 1), link addr 0 (CPU at slot 0).
+          - "1,1"      → backplane, CPU at slot 1.
+          - "1,2,A,192.168.1.50,1,0" — multi-hop through a remote chassis.
+            Tokens are decimal (0..255) or 0xNN hex; the parser passes the
+            bytes through verbatim, even-padded.
+
+        Every CIP request is wrapped in Unconnected_Send (service 0x52)
+        addressed to the Connection Manager (class 0x06, instance 1) so the
+        same code path works whether the route is empty or several hops
+        deep.
+        """
         self._host = host
         self._port = port
         self._reader: asyncio.StreamReader | None = None
@@ -46,6 +68,9 @@ class TagClient:
         # itself — that has to stay symbolic on the wire).
         self._controller_atoms: dict[str, int] = {}            # name -> inst
         self._program_atoms: dict[tuple[str, str], int] = {}    # (prog, name) -> inst
+        # Routing path bytes used to walk from the EtherNet/IP module to the
+        # CPU. Set from the libplctag-style `path` string passed to __init__.
+        self._route_path: bytes = _parse_route_path(path)
 
     @property
     def is_connected(self) -> bool:
@@ -450,11 +475,36 @@ class TagClient:
 
     async def _send_cip_with_status(self, service_code: int, cip_path: bytes,
                                      service_data: bytes) -> tuple[int, bytes]:
-        mr_data = mr_codec.encode_request(service_code, cip_path, service_data)
+        # The actual tag service request — service + path + data.
+        inner_mr = mr_codec.encode_request(service_code, cip_path, service_data)
+
+        # Wrap in Unconnected_Send (service 0x52, Connection Manager) ONLY
+        # when a route path was configured. The EtherNet/IP module of a
+        # ControlLogix chassis won't auto-deliver an empty-route
+        # Unconnected_Send to the CPU at slot N; the user must say
+        # path="1,N" so the Connection Manager knows where to forward.
+        # When the route is empty the request is sent as bare MR, which is
+        # what CompactLogix and EN-hosted symbol services expect.
+        if self._route_path:
+            priority_tick    = 0x07   # priority 0, time-tick 7  (~ms granularity)
+            timeout_ticks    = 0xF9   # 249 * 2^7 ms = ~31.9 s   (generous embed timeout)
+            route_size_words = len(self._route_path) // 2
+            us_data = bytearray()
+            us_data += struct.pack('<BBH', priority_tick, timeout_ticks, len(inner_mr))
+            us_data += inner_mr
+            if len(inner_mr) % 2:
+                us_data.append(0)      # pad embedded msg to word boundary
+            us_data += struct.pack('<BB', route_size_words, 0)
+            us_data += self._route_path
+
+            cm_path = bytes([0x20, 0x06, 0x24, 0x01])   # Connection Manager
+            mr_to_send = mr_codec.encode_request(0x52, cm_path, bytes(us_data))
+        else:
+            mr_to_send = inner_mr
 
         items = [
             CpfItem(CpfItemType.NULL_ADDRESS, b''),
-            CpfItem(CpfItemType.UNCONNECTED_DATA, mr_data),
+            CpfItem(CpfItemType.UNCONNECTED_DATA, mr_to_send),
         ]
         cpf_data = encode_cpf(items)
         payload = bytearray(6 + len(cpf_data))
@@ -590,6 +640,41 @@ class TagClient:
             if self._last_header.length > 0:
                 resp_payload = await self._reader.readexactly(self._last_header.length)
             return resp_payload
+
+
+def _parse_route_path(path: str | None) -> bytes:
+    """Parse a libplctag-style route path string into bytes.
+
+    Each comma-separated token is one byte. Tokens may be decimal
+    (e.g. ``"1"``) or 0xNN hex (``"0x01"``). Whitespace around tokens is
+    trimmed. Empty / None input returns ``b""``. If the result has an odd
+    number of bytes, a trailing ``\\x00`` pad is added so the encoded
+    route is an integer number of CIP words (the wire field is sized in
+    16-bit words).
+
+    Examples:
+        None / "" / "  "       -> b""
+        "1,0"                   -> b"\\x01\\x00"
+        "1,2"                   -> b"\\x01\\x02"
+        "0x01, 0x00"            -> b"\\x01\\x00"
+    """
+    if not path or not path.strip():
+        return b""
+    out = bytearray()
+    for tok in path.split(','):
+        s = tok.strip()
+        if not s:
+            continue
+        try:
+            v = int(s, 0)        # accepts 0xNN, 0oNN, decimal
+        except ValueError as e:
+            raise ValueError(f"route path token {tok!r}: {e}") from None
+        if not 0 <= v <= 0xFF:
+            raise ValueError(f"route path byte out of range: {tok!r}")
+        out.append(v)
+    if len(out) % 2:
+        out.append(0)
+    return bytes(out)
 
 
 def _split_brackets(piece: str) -> tuple[str, list[list[int]]]:
