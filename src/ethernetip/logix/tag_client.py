@@ -120,8 +120,8 @@ class TagClient:
     async def _open_class3(self) -> None:
         """Open a Class 3 connected explicit connection to the destination's
         Message Router. The Forward_Open's connection_path embeds our route
-        path (Phase B) followed by the Message Router app path, so subsequent
-        SendUnitData traffic reaches the CPU without per-request routing.
+        bytes followed by the Message Router segment, so subsequent
+        SendUnitData traffic reaches the CPU with no per-request routing.
         """
         import time
         self._conn_serial = (int(time.monotonic_ns() // 1000) & 0xFFFF) or 1
@@ -154,11 +154,11 @@ class TagClient:
         fo[36:36 + len(app_path)] = app_path
 
         # Forward_Open targets the LOCAL Connection Manager and must go
-        # as BARE MR — not Unconnected_Send-wrapped. The routing happens
-        # at connection-setup time using the connection_path embedded in
-        # the FO body (which we already prefixed with self._route_path).
-        # Temporarily clear both the Class-3 flag (so we don't recurse)
-        # and the route path (so Phase B doesn't add a UCS wrap).
+        # as bare MR — not Unconnected_Send-wrapped. The routing is
+        # carried inside the FO body's connection_path (already prefixed
+        # with self._route_path above), not around it. Temporarily clear
+        # the Class-3 flag so _send_cip_with_status doesn't recurse, and
+        # the route path so it doesn't add a UCS wrap.
         was_class3 = self._class3_open
         saved_route = self._route_path
         self._class3_open = False

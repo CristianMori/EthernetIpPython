@@ -53,8 +53,12 @@ This is a pure-Python port of [EthernetIPSharp](../EthernetIPSharp). All three p
 **Logix tag protocol**
 - `Read Tag` (0x4C), `Write Tag` (0x4D), Fragmented variants (0x52/0x53), `Read Modify Write` (0x4E)
 - `Multiple Service Packet` (0x0A) for batched explicit messages
-- Tag browsing via `Get Instance Attribute List` (0x55) — paginated
-- UDT template queries and structure read/write (auto-fragmented for >504-byte structs)
+- Tag browsing via `Get Instance Attribute List` (0x55) — paginated; automatically resolves controller + program scopes and pulls UDT templates
+- UDT template queries and structure read/write (auto-fragmented for structs >504 B)
+- Array indexer syntax in tag names: `counts[3]`, `Temp[10].AnotherArray[4]`, Studio 5000 multi-dim `arr[1,2,3]`
+- ControlLogix backplane routing via a libplctag-style `path` (e.g. `"1,0"` for backplane → slot 0) — wraps each request in `Unconnected_Send` to the Connection Manager
+- Opt-in Class 3 connected explicit messaging (`use_connected=True`) — opens a Forward_Open at connect time, every read/write rides `SendUnitData` instead of UCMM
+- Instance-ID cache populated transparently by `browse_tags()` so subsequent reads send a 6-byte Symbol Object segment instead of the longer ANSI symbolic name
 - `TagClient` for connecting to a real PLC and reading/writing tags by name
 - Logix STRING handling (88-byte UDT: LEN(DINT) + DATA(SINT[82]))
 
@@ -273,16 +277,26 @@ conn.on_data_received.append(lambda data: ...)
 
 ```python
 import asyncio
-from ethernetip.logix.tag_client import TagClient
+from ethernetip.logix.tag_client import TagClient, StructureValue
 
 
 async def main():
+    # CompactLogix or EN-hosted symbol service — no backplane route required.
     async with TagClient("192.168.1.96") as client:
         # Read & write simple atomic tags
         rate = await client.read_dint("rate")
         await client.write_dint("rate", 1500)
 
-        # Read a structured tag by template
+        # Array element access — Studio 5000 syntax works directly. Brackets
+        # are emitted as CIP Logical Element segments after the symbolic name.
+        third = await client.read_dint("counts[3]")
+        nested = await client.read_dint("Temp[10].AnotherArray[4]")
+        multi = await client.read_dint("matrix[1,2,3]")
+
+        # Browse populates an internal Symbol-Object instance cache. After
+        # this call every subsequent tag access uses the short 6-byte
+        # instance-ID form in place of the ANSI symbolic name — no API
+        # change, just less wire.
         browse = await client.browse_tags()
         tag = next(t for t in browse.tags if t.name == "MyUdt")
         value = await client.read_struct("MyUdt", tag.template)
@@ -291,7 +305,6 @@ async def main():
             print(f"{name} = {val}")
 
         # Write a structure
-        from ethernetip.logix.tag_client import StructureValue
         writer = StructureValue(tag.template)
         writer.set_bool("enable", True)
         writer.set_dint("setpoint", 100)
@@ -299,6 +312,27 @@ async def main():
 
 
 asyncio.run(main())
+```
+
+For a **ControlLogix chassis** where the CPU is at a separate backplane slot,
+pass a libplctag-style route. Tokens are decimal or `0xNN` hex; pairs are
+`port,link` (port 1 = backplane, link = slot):
+
+```python
+# Walk from a 1756-EN2T at .96 to the CPU at slot 0.
+async with TagClient("192.168.1.96", path="1,0") as client:
+    rate = await client.read_dint("rate")
+```
+
+For hot polling loops, opt in to Class 3 connected explicit messaging. The
+context manager performs a Forward_Open against the destination Message
+Router at entry; every subsequent request rides `SendUnitData`. Exit closes
+the connection cleanly with a Forward_Close.
+
+```python
+async with TagClient("192.168.1.96", path="1,0", use_connected=True) as c:
+    for _ in range(10_000):
+        await c.read_dint("rate")
 ```
 
 ### Logix tag server
@@ -460,7 +494,7 @@ The test suite covers CIP path parsing, MR codec, encapsulation, scanner ↔ ada
 | Type | What it is |
 |---|---|
 | `LogixDispatcher` | Server side. Dispatches tag services + UDT template queries |
-| `TagClient` | Client side. Connect to a real PLC and read/write tags. Auto-fragments large struct reads. |
+| `TagClient` | Client side. Connect to a real PLC and read/write tags. Accepts an optional libplctag-style routing `path` (e.g. `"1,0"` for backplane → slot 0) and a `use_connected` flag for Class 3 connected explicit messaging. `browse_tags()` populates a Symbol-Object instance-ID cache that shortens every later tag path. Auto-fragments large struct reads. |
 | `TagDatabase`, `Tag` | In-memory tag store with `on_value_changed` callbacks |
 | `data_types` | Standard Logix atomic types (DINT, REAL, INT, SINT, LINT, LREAL, BOOL) |
 | `StructureValue` | Helper for reading/writing UDT structures by member name |
