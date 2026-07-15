@@ -133,6 +133,12 @@ class SafetyScannerConnection:
         conn._route_prefix = route_prefix
         conn._output_data = bytearray(server_config.consumed_data_size)
         conn._input_data_size = client_config.produced_data_size
+        # Seed producer state from the values we advertise in the safety
+        # segment — a spec-compliant consumer reads the same values off the
+        # segment and starts its rollover counter there, so both ends must
+        # agree from frame 1.
+        conn._timestamp = server_config.initial_timestamp
+        conn._rollover_count = server_config.initial_rollover_value
 
         # Distinct conn serials per direction
         base = int(time.time() * 1000) & 0xFFFF
@@ -262,7 +268,10 @@ class SafetyScannerConnection:
 
         if self._consumer_active:
             # 50ms / 128µs ≈ 390 ticks per frame — placeholder, matches C# scanner.
+            prev_ts = self._timestamp
             self._timestamp = (self._timestamp + 390) & 0xFFFF
+            if self._timestamp < prev_ts:
+                self._rollover_count = (self._rollover_count + 1) & 0xFFFF
 
         buf = bytearray(len(self._output_data) * 2 + 16)
         n = encode_safety_frame(
