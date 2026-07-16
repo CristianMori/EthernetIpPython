@@ -263,7 +263,15 @@ class SafetyScannerConnection:
         if not self.is_open or self._target_endpoint is None:
             return
         run_idle = self._consumer_active and self._run_idle
+        # Snapshot both counters BEFORE advancing them. The frame we're about
+        # to encode carries the OLD timestamp with the OLD rollover; the
+        # consumer detects the wrap from the *next* frame's timestamp jump and
+        # bumps its own rollover to match. Reading rollover after the bump
+        # would emit (old_ts, new_rollover) on the wrap frame, which CRCs
+        # with the wrong seed and shows up as one failed frame per wrap
+        # boundary.
         timestamp = self._timestamp if self._consumer_active else 0
+        rollover = self._rollover_count
         mode = ModeByte.create(run_idle=run_idle, ping_count=self._ping_count)
 
         if self._consumer_active:
@@ -277,7 +285,7 @@ class SafetyScannerConnection:
         n = encode_safety_frame(
             buf, bytes(self._output_data), self._format, mode, timestamp,
             self._pid_seed_s1, self._pid_seed_s3, self._pid_seed_s5,
-            self._rollover_count)
+            rollover)
         if n <= 0:
             return
         self._udp.send_io_data(self._target_endpoint, self._server_ot_id,
