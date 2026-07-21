@@ -51,6 +51,25 @@ def parse_connection_path(path: bytes | bytearray | memoryview,
         seg = p[offset]
         seg_type = seg & 0xE0
 
+        # Electronic key `0x34` MUST be checked BEFORE the generic
+        # logical-segment branch. `0x34 & 0xE0 == 0x20`, so a naive
+        # `seg_type == 0x20` dispatch treats the key segment as an
+        # unknown logical type, skips only its first byte, and then
+        # mis-decodes the 8-byte key payload as further segments.
+        # Works "by accident" today because Studio 5000 emits key data
+        # as all zeros (vendor/device/prod/rev = "any") and 0x00 is a
+        # valid port segment leader — so the 8 key bytes get walked
+        # as 4 no-op port segments. A PLC enforcing electronic keying
+        # would silently misparse.
+        if seg == 0x34:  # Electronic key
+            has_key = True
+            offset += 1
+            if offset >= len(p): break
+            key_format = p[offset]; offset += 1
+            key_size = 8 if key_format in (4, 5) else 0
+            offset += key_size
+            continue
+
         if seg_type == 0x20:  # Logical segment
             logical_type = seg & 0x1C
             fmt = seg & 0x03
@@ -85,14 +104,6 @@ def parse_connection_path(path: bytes | bytearray | memoryview,
             else:
                 if offset >= len(p): break
                 offset += 1
-
-        elif seg == 0x34:  # Electronic key
-            has_key = True
-            offset += 1
-            if offset >= len(p): break
-            key_format = p[offset]; offset += 1
-            key_size = 8 if key_format in (4, 5) else 0
-            offset += key_size
 
         elif seg_type == 0x80:  # Simple Data Segment (config data)
             offset += 1
