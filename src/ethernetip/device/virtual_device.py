@@ -170,6 +170,9 @@ class VirtualDevice:
                 await asyncio.sleep(timeout_s)
                 if conn.state != ConnectionState.ESTABLISHED:
                     break
+                # CIP Vol 1 §3-4.5.2: don't count until first inbound frame.
+                if not conn.first_received:
+                    continue
                 elapsed = (datetime.now(timezone.utc) - conn.last_received_utc).total_seconds()
                 if elapsed > timeout_s:
                     self.connection_manager.timeout_connection(conn)
@@ -182,6 +185,7 @@ class VirtualDevice:
             return
 
         conn.last_received_utc = datetime.now(timezone.utc)
+        conn.first_received = True
         self.handle_received_io_data(conn, data)
 
     def handle_received_io_data(self, conn: IoConnection, data: bytes) -> None:
