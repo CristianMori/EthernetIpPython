@@ -1,9 +1,30 @@
 [project]
-name = "ethernetip"
+name = "cm-ethernetip"
 version = "0.1.0"
-description = "EtherNet/IP and CIP protocol stack in pure Python"
+description = "EtherNet/IP, CIP, CIP Safety, and Allen-Bradley Logix in pure Python"
+readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "Cristian Mori" }]
+keywords = ["ethernet-ip", "cip", "cip-safety", "logix", "controllogix", "allen-bradley", "plc", "industrial", "automation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Manufacturing",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications",
+    "Topic :: System :: Networking",
+    "Operating System :: OS Independent",
+]
 dependencies = []
+
+[project.urls]
+Repository = "https://github.com/CristianMori/EthernetIpPython"
+Homepage = "https://github.com/CristianMori/EthernetIpPython"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
