@@ -4,7 +4,9 @@ import struct
 
 from ..cip.service import CipServiceResponse
 from ..cip.status import CipStatus
+from . import data_types as dt
 from .tag import Tag
+from .walker import WalkResult
 
 READ_TAG = 0x4C
 WRITE_TAG = 0x4D
@@ -124,9 +126,11 @@ def handle_read_modify_write(tag: Tag, service_code: int, data: bytes) -> CipSer
 
 
 def _build_read_response(tag: Tag, service_code: int, offset: int,
-                          length: int, partial: bool) -> CipServiceResponse:
+                          length: int, partial: bool,
+                          type_code: int | None = None) -> CipServiceResponse:
+    tc = tag.tag_type if type_code is None else type_code
     resp = bytearray(2 + length)
-    struct.pack_into('<H', resp, 0, tag.tag_type)
+    struct.pack_into('<H', resp, 0, tc)
     resp[2:] = tag.get_data(offset, length)
 
     if partial:
@@ -136,3 +140,60 @@ def _build_read_response(tag: Tag, service_code: int, offset: int,
             data=bytes(resp),
         )
     return CipServiceResponse.success(service_code, bytes(resp))
+
+
+# --- Walker-aware variants (gaps 2, 5, 6) ---
+
+def handle_read_tag_at(tag: Tag, service_code: int, data: bytes,
+                       walked: WalkResult) -> CipServiceResponse:
+    if len(data) < 2:
+        return CipServiceResponse.error(service_code, CipStatus.error(0x13))
+    element_count = struct.unpack_from('<H', data, 0)[0]
+
+    # BOOL bit read: single-byte 0x01 / 0x00 reply.
+    if walked.bit_pos is not None:
+        if element_count != 1:
+            return CipServiceResponse.error(service_code, CipStatus.error(0xFF, 0x2105))
+        host = tag.get_data(walked.offset, 1)[0]
+        bit = (host >> walked.bit_pos) & 0x01
+        reply = struct.pack('<H', dt.BOOL) + bytes([bit])
+        return CipServiceResponse.success(service_code, reply)
+
+    bytes_to_read = element_count * walked.element_size
+    if walked.offset + bytes_to_read > tag.data_size:
+        return CipServiceResponse.error(service_code, CipStatus.error(0xFF, 0x2105))
+
+    if 2 + bytes_to_read > MAX_REPLY_DATA:
+        fit = MAX_REPLY_DATA - 2
+        return _build_read_response(tag, service_code, walked.offset, fit,
+                                    partial=True, type_code=walked.type_code)
+    return _build_read_response(tag, service_code, walked.offset, bytes_to_read,
+                                partial=False, type_code=walked.type_code)
+
+
+def handle_write_tag_at(tag: Tag, service_code: int, data: bytes,
+                        walked: WalkResult) -> CipServiceResponse:
+    if len(data) < 4:
+        return CipServiceResponse.error(service_code, CipStatus.error(0x13))
+    tag_type = struct.unpack_from('<H', data, 0)[0]
+    element_count = struct.unpack_from('<H', data, 2)[0]
+
+    if tag_type != walked.type_code:
+        return CipServiceResponse.error(service_code, CipStatus.error(0xFF, 0x2107))
+
+    # BOOL bit write: read 1 byte from payload, RMW via atomic_set_bit.
+    if walked.bit_pos is not None:
+        if element_count != 1 or len(data) < 5:
+            return CipServiceResponse.error(service_code, CipStatus.error(0x13))
+        new_value = (data[4] & 0x01) != 0
+        tag.atomic_set_bit(walked.offset, walked.bit_pos, new_value)
+        return CipServiceResponse.success(service_code)
+
+    bytes_to_write = element_count * walked.element_size
+    if len(data) < 4 + bytes_to_write:
+        return CipServiceResponse.error(service_code, CipStatus.error(0x13))
+    if walked.offset + bytes_to_write > tag.data_size:
+        return CipServiceResponse.error(service_code, CipStatus.error(0xFF, 0x2105))
+
+    tag.set_data(data[4:4 + bytes_to_write], walked.offset)
+    return CipServiceResponse.success(service_code)
