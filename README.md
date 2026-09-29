@@ -61,6 +61,19 @@ This is a pure-Python port of [EthernetIPSharp](../EthernetIPSharp). All three p
 - Instance-ID cache populated transparently by `browse_tags()` so subsequent reads send a 6-byte Symbol Object segment instead of the longer ANSI symbolic name
 - `TagClient` for connecting to a real PLC and reading/writing tags by name
 - Logix STRING handling (88-byte UDT: LEN(DINT) + DATA(SINT[82]))
+- `EipScanner.send_generic(service, class, instance, attribute, data, route)` — idiomatic CIP request wrapper with optional `Unconnected_Send` backplane routing
+
+**Logix tag server (Studio-5000-compatible)**
+- Program-scoped tags — clients address them as `Program:Cell.Timer1.PRE`; `TagDatabase.register_program` opens a scope, `add_program_tag` populates it
+- Nested UDT templates via `add_template` (auto-computes layout) or `add_template_prebuilt(TemplateDefinition)` — the transpiler escape hatch for L5X exports including AOI backing structures (32-per-DINT BOOL packing) and STRING
+- Segment-aware path walker (`walker.walk`) — a CIP request for `Motor.Timer.PRE`, `Motor.DN`, `Line[2].Speed`, `Matrix[1,2,3]` returns the right bytes and the right type code
+- Multi-dimensional arrays: `add_tag("Matrix", DINT, dims=(5,10,4))` with row-major indexing and under-index detection
+- DWORD-packed BOOL arrays: `add_tag("Flags", BOOL, element_count=32)` occupies 4 bytes; `Flags[5]` addresses bit 5 of byte 0
+- Atomic BOOL bit RMW via `Tag.atomic_set_bit` (GIL-atomic single-byte |= / &=)
+- `write_dint_silent`, `set_data_silent`, `TagDatabase.suppress_events` for high-throughput scan loops without per-write callbacks
+- Optional dirty-tag tracking with `enable_dirty_tracking()` / `drain_dirty()`
+- `persistence.save` / `load` — compact binary snapshot byte-for-byte compatible with the C#, Rust, and C++ ports (same `EIPS` magic + version + LE fields)
+- Documented tearing model: aligned scalar reads/writes are atomic on x86/x64; multi-scalar struct reads may tear (matches 1756 behavior)
 
 **Diagnostics**
 - Connection lifecycle events on `ConnectionManager.on_connection_established` / `on_connection_removed`
@@ -549,7 +562,7 @@ The full safety ownership state machine (Propose_TUNID / Apply_TUNID / Configure
 ## Known limitations
 
 - 10 ms RPI runs stably for hours on Linux; on Windows the asyncio scheduler tail can occasionally exceed 50 ms, so for sub-20-ms RPIs use the C# or C++ ports.
-- No persistent storage — assembly contents and tag values are in-memory only.
+- Assembly Object contents are in-memory only (tag values persist via `persistence.save` / `load`).
 - Originator-side connection bridging through multiple hops is not implemented.
 - Safety reset / safety configuration apply services are wired in but not extensively interop-tested.
 
