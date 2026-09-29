@@ -55,6 +55,31 @@ class EipScanner:
 
         self.session_handle = await self._register_session()
 
+    async def send_generic(self, service_code: int, class_id: int, instance_id: int,
+                           attribute_id: int | None = None, data: bytes = b'',
+                           route_path: bytes = b'') -> CipServiceResponse:
+        """Idiomatic wrapper for CIP requests to class/instance/attribute.
+        Wraps in Unconnected_Send through the Connection Manager when
+        route_path is non-empty (backplane routing to a CPU in another
+        slot); otherwise sends as bare MR."""
+        from ..cip.path_builder import build_path
+        from ..cip.unconnected_send import build_inner_mr, wrap
+
+        path_bytes = build_path(
+            class_id=class_id, instance_id=instance_id, attribute_id=attribute_id
+        )
+        if route_path:
+            inner = build_inner_mr(service_code, path_bytes, data)
+            outer = wrap(inner, route_path)
+            # Re-extract (service, path, data) for send_explicit's signature.
+            outer_service = outer[0]
+            outer_path_words = outer[1]
+            outer_path_len = outer_path_words * 2
+            outer_path = outer[2:2 + outer_path_len]
+            outer_data = outer[2 + outer_path_len:]
+            return await self.send_explicit(outer_service, outer_path, outer_data)
+        return await self.send_explicit(service_code, path_bytes, data)
+
     async def send_explicit(self, service_code: int, path_bytes: bytes,
                             service_data: bytes = b'') -> CipServiceResponse:
         if not self.is_connected:
