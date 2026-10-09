@@ -64,6 +64,7 @@ This is a pure-Python port of [EthernetIPSharp](../EthernetIPSharp). All three p
 - `EipScanner.send_generic(service, class, instance, attribute, data, route)` — idiomatic CIP request wrapper with optional `Unconnected_Send` backplane routing
 
 **Logix tag server (Studio-5000-compatible)**
+- Full CIP Vol 1 §C-6.1 elementary type family — `BOOL`, signed integers (`SINT`/`INT`/`DINT`/`LINT`), unsigned integers (`USINT`/`UINT`/`UDINT`/`ULINT`), floats (`REAL`/`LREAL`), and bit strings (`BYTE`/`WORD`/`DWORD`/`LWORD`)
 - Program-scoped tags — clients address them as `Program:Cell.Timer1.PRE`; `TagDatabase.register_program` opens a scope, `add_program_tag` populates it
 - Nested UDT templates via `add_template` (auto-computes layout) or `add_template_prebuilt(TemplateDefinition)` — the transpiler escape hatch for L5X exports including AOI backing structures (32-per-DINT BOOL packing) and STRING
 - Segment-aware path walker (`walker.walk`) — a CIP request for `Motor.Timer.PRE`, `Motor.DN`, `Line[2].Speed`, `Matrix[1,2,3]` returns the right bytes and the right type code
