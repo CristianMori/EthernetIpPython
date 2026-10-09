@@ -308,6 +308,42 @@ class TagClient:
         raw = await self.read_tag_raw(tag_name, 1)
         return struct.unpack_from('<d', raw, 2)[0]
 
+    # --- Unsigned integer read helpers (CIP Vol 1 §C-6.1) ---
+
+    async def read_usint(self, tag_name: str) -> int:
+        raw = await self.read_tag_raw(tag_name, 1)
+        return struct.unpack_from('<B', raw, 2)[0]
+
+    async def read_uint(self, tag_name: str) -> int:
+        raw = await self.read_tag_raw(tag_name, 1)
+        return struct.unpack_from('<H', raw, 2)[0]
+
+    async def read_udint(self, tag_name: str) -> int:
+        raw = await self.read_tag_raw(tag_name, 1)
+        return struct.unpack_from('<I', raw, 2)[0]
+
+    async def read_ulint(self, tag_name: str) -> int:
+        raw = await self.read_tag_raw(tag_name, 1)
+        return struct.unpack_from('<Q', raw, 2)[0]
+
+    # --- Bit-string read helpers (same width as the matching unsigned int) ---
+
+    async def read_byte(self, tag_name: str) -> int:
+        raw = await self.read_tag_raw(tag_name, 1)
+        return struct.unpack_from('<B', raw, 2)[0]
+
+    async def read_word(self, tag_name: str) -> int:
+        raw = await self.read_tag_raw(tag_name, 1)
+        return struct.unpack_from('<H', raw, 2)[0]
+
+    async def read_dword(self, tag_name: str) -> int:
+        raw = await self.read_tag_raw(tag_name, 1)
+        return struct.unpack_from('<I', raw, 2)[0]
+
+    async def read_lword(self, tag_name: str) -> int:
+        raw = await self.read_tag_raw(tag_name, 1)
+        return struct.unpack_from('<Q', raw, 2)[0]
+
     async def read_string(self, tag_name: str) -> str:
         """Read a Logix STRING tag (UDT: LEN(DINT) + DATA(SINT[82]))."""
         raw = await self.read_tag_raw(tag_name, 1)
@@ -378,6 +414,52 @@ class TagClient:
     async def write_lreal(self, tag_name: str, value: float) -> None:
         path = self._build_tag_path(tag_name)
         data = struct.pack('<HHd', dt.LREAL, 1, value)
+        await self._send_cip(0x4D, path, data)
+
+    # --- Unsigned integer write helpers (CIP Vol 1 §C-6.1) ---
+    # Each writes with the matching tag_type so the server-side type check
+    # in Write_Tag matches a tag registered as the unsigned CIP code.
+
+    async def write_usint(self, tag_name: str, value: int) -> None:
+        path = self._build_tag_path(tag_name)
+        data = struct.pack('<HHB', dt.USINT, 1, value)
+        await self._send_cip(0x4D, path, data)
+
+    async def write_uint(self, tag_name: str, value: int) -> None:
+        path = self._build_tag_path(tag_name)
+        data = struct.pack('<HHH', dt.UINT, 1, value)
+        await self._send_cip(0x4D, path, data)
+
+    async def write_udint(self, tag_name: str, value: int) -> None:
+        path = self._build_tag_path(tag_name)
+        data = struct.pack('<HHI', dt.UDINT, 1, value)
+        await self._send_cip(0x4D, path, data)
+
+    async def write_ulint(self, tag_name: str, value: int) -> None:
+        path = self._build_tag_path(tag_name)
+        data = struct.pack('<HHQ', dt.ULINT, 1, value)
+        await self._send_cip(0x4D, path, data)
+
+    # --- Bit-string write helpers ---
+
+    async def write_byte(self, tag_name: str, value: int) -> None:
+        path = self._build_tag_path(tag_name)
+        data = struct.pack('<HHB', dt.BYTE, 1, value)
+        await self._send_cip(0x4D, path, data)
+
+    async def write_word(self, tag_name: str, value: int) -> None:
+        path = self._build_tag_path(tag_name)
+        data = struct.pack('<HHH', dt.WORD, 1, value)
+        await self._send_cip(0x4D, path, data)
+
+    async def write_dword(self, tag_name: str, value: int) -> None:
+        path = self._build_tag_path(tag_name)
+        data = struct.pack('<HHI', dt.DWORD, 1, value)
+        await self._send_cip(0x4D, path, data)
+
+    async def write_lword(self, tag_name: str, value: int) -> None:
+        path = self._build_tag_path(tag_name)
+        data = struct.pack('<HHQ', dt.LWORD, 1, value)
         await self._send_cip(0x4D, path, data)
 
     async def write_raw(self, tag_name: str, tag_type: int, element_count: int, value: bytes) -> None:

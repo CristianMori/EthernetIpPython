@@ -3,6 +3,7 @@
 from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
+from enum import IntEnum
 
 
 # Segment type constants
@@ -25,6 +26,33 @@ _LOGICAL_FORMAT_16BIT = 0x01
 _LOGICAL_FORMAT_32BIT = 0x02
 
 
+class LogicalKind(IntEnum):
+    """Logical segment kind (matches the low bits of the segment type nibble)."""
+    CLASS_ID = 0x00
+    INSTANCE_ID = 0x04
+    CONNECTION_POINT = 0x0C
+    ATTRIBUTE_ID = 0x10
+
+
+@dataclass(frozen=True)
+class SymbolicPathSegment:
+    """ANSI Extended Symbolic (0x91) — a tag name or member name."""
+    name: str
+
+
+@dataclass(frozen=True)
+class ElementPathSegment:
+    """Logical Element ID (0x28/0x29/0x2A) — one array index."""
+    index: int
+
+
+@dataclass(frozen=True)
+class LogicalPathSegment:
+    """Any other logical segment (Class, Instance, Attribute, ConnectionPoint)."""
+    kind: LogicalKind
+    value: int
+
+
 @dataclass(frozen=True)
 class CipPath:
     class_id: int | None = None
@@ -34,6 +62,9 @@ class CipPath:
     element_id: int | None = None
     symbolic_name: str | None = None
     raw_path: bytes | None = None
+    # Every parsed segment in on-wire order.  Empty tuple for object-initialized
+    # CipPaths that don't populate it; the parser fills it in.
+    segments: tuple = field(default=())
 
     @staticmethod
     def parse(data: bytes | bytearray | memoryview) -> tuple[CipPath, int]:
@@ -44,6 +75,7 @@ class CipPath:
         connection_point = None
         element_id = None
         symbolic_parts: list[str] = []
+        segments: list = []
         offset = 0
 
         while offset < len(data):
@@ -59,6 +91,7 @@ class CipPath:
                 if char_count % 2 != 0:
                     offset += 1  # pad to word boundary
                 symbolic_parts.append(name)
+                segments.append(SymbolicPathSegment(name))
                 continue
 
             seg_type = seg_byte & _SEGMENT_TYPE_MASK
@@ -87,14 +120,19 @@ class CipPath:
                 match logical_type:
                     case 0x00:  # class
                         class_id = value
+                        segments.append(LogicalPathSegment(LogicalKind.CLASS_ID, value))
                     case 0x04:  # instance
                         instance_id = value
+                        segments.append(LogicalPathSegment(LogicalKind.INSTANCE_ID, value))
                     case 0x10:  # attribute
                         attribute_id = value
+                        segments.append(LogicalPathSegment(LogicalKind.ATTRIBUTE_ID, value))
                     case 0x0C:  # connection point
                         connection_point = value
+                        segments.append(LogicalPathSegment(LogicalKind.CONNECTION_POINT, value))
                     case 0x08:  # element
                         element_id = value
+                        segments.append(ElementPathSegment(value))
             else:
                 break  # unknown segment type
 
@@ -108,6 +146,7 @@ class CipPath:
             element_id=element_id,
             symbolic_name=symbolic_name,
             raw_path=bytes(data[:offset]),
+            segments=tuple(segments),
         )
         return path, offset
 

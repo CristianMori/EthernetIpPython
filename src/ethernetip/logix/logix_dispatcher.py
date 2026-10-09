@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from ..cip.dispatcher import CipDispatcher
 from ..cip.cip_class import CipClass
-from ..cip.path import CipPath
+from ..cip.path import (
+    CipPath,
+    ElementPathSegment,
+    LogicalPathSegment,
+    SymbolicPathSegment,
+)
 from ..cip.service import CipServiceDefinition, CipServiceResponse
 from ..cip.status import CipStatus, SERVICE_NOT_SUPPORTED
 from ..cip.identity_info import IdentityInfo
@@ -18,6 +23,7 @@ from .symbol_object import SymbolObject
 from .template_object import TemplateObject
 from .multi_service import SERVICE_CODE as MULTI_SVC, handle_multi_service
 from . import tag_services as ts
+from .walker import walk
 
 
 class LogixDispatcher(CipDispatcher):
@@ -89,6 +95,41 @@ class LogixDispatcher(CipDispatcher):
 
     def on_unhandled(self, service_code: int, path: CipPath, data: bytes,
                      default_status: int | None = None) -> CipServiceResponse:
+        # Prefer the ordered segments list when present (walker-aware path).
+        # Fall back to the flat symbolic_name lookup for callers that build
+        # CipPath via constructor without populating segments.
+        segments = path.segments or ()
+        first_sym_idx = _first_symbolic(segments)
+
+        if first_sym_idx >= 0:
+            first_name = segments[first_sym_idx].name
+
+            # Program-scope prefix: Program:<name>.<tag>
+            if first_name.startswith("Program:"):
+                program_name = first_name[len("Program:"):]
+                if self.tags.find_program(program_name) is None:
+                    return CipServiceResponse.error(service_code, CipStatus.error(0x05))
+                root_idx = _first_symbolic(segments, first_sym_idx + 1)
+                if root_idx < 0:
+                    return CipServiceResponse.error(service_code, CipStatus.error(0x05))
+                root_name = segments[root_idx].name
+                tag = self.tags.find_program_tag(program_name, root_name)
+                if tag is None:
+                    return CipServiceResponse.error(service_code, CipStatus.error(0x05))
+                post = _collect_post_root(segments, root_idx)
+                return self._dispatch_with_walker(tag, service_code, data, post)
+
+            # Controller scope.
+            key = first_name.lower()
+            tag = self._symbol_cache.get(key)
+            if tag is None:
+                tag = self.tags.find_by_name(first_name)
+                if tag is None:
+                    return CipServiceResponse.error(service_code, CipStatus.error(0x05))
+                self._symbol_cache[key] = tag
+            post = _collect_post_root(segments, first_sym_idx)
+            return self._dispatch_with_walker(tag, service_code, data, post)
+
         if path.symbolic_name is not None:
             key = path.symbolic_name.lower()
             tag = self._symbol_cache.get(key)
@@ -105,6 +146,48 @@ class LogixDispatcher(CipDispatcher):
             from ..cip.status import PATH_DESTINATION_UNKNOWN
             default_status = PATH_DESTINATION_UNKNOWN
         return super().on_unhandled(service_code, path, data, default_status)
+
+    def _dispatch_with_walker(self, tag: Tag, service_code: int,
+                              data: bytes, post_root: list) -> CipServiceResponse:
+        if not post_root:
+            return _dispatch_tag_service(tag, service_code, data, 0)
+        result, err = walk(tag, post_root, self.tags)
+        if result is None:
+            return CipServiceResponse.error(service_code, CipStatus.error(0x05))
+        return _dispatch_walked(tag, service_code, data, result)
+
+
+def _first_symbolic(segments, start: int = 0) -> int:
+    for i in range(start, len(segments)):
+        if isinstance(segments[i], SymbolicPathSegment):
+            return i
+    return -1
+
+
+def _collect_post_root(segments, root_idx: int) -> list:
+    out = []
+    for i in range(root_idx + 1, len(segments)):
+        seg = segments[i]
+        if isinstance(seg, LogicalPathSegment):
+            continue
+        out.append(seg)
+    return out
+
+
+def _dispatch_walked(tag: Tag, service_code: int, data: bytes, walked) -> CipServiceResponse:
+    match service_code:
+        case 0x4C:
+            return ts.handle_read_tag_at(tag, service_code, data, walked)
+        case 0x4D:
+            return ts.handle_write_tag_at(tag, service_code, data, walked)
+        case 0x52:
+            return ts.handle_read_tag_fragmented(tag, service_code, data)
+        case 0x53:
+            return ts.handle_write_tag_fragmented(tag, service_code, data)
+        case 0x4E:
+            return ts.handle_read_modify_write(tag, service_code, data)
+        case _:
+            return CipServiceResponse.error(service_code, CipStatus.error(SERVICE_NOT_SUPPORTED))
 
 
 def _dispatch_tag_service(tag: Tag, service_code: int, data: bytes,
