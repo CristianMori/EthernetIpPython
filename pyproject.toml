@@ -1,6 +1,6 @@
 [project]
 name = "cm-ethernetip"
-version = "0.1.0"
+version = "0.2.0"
 description = "EtherNet/IP, CIP, CIP Safety, and Allen-Bradley Logix in pure Python"
 readme = "README.md"
 requires-python = ">=3.10"
