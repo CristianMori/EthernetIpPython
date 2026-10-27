@@ -1,15 +1,50 @@
 # EthernetIPPython
 
-A complete EtherNet/IP and CIP Safety protocol stack written in Python 3 (asyncio). Acts as **adapter** (target / I/O slave), **scanner** (originator / I/O master), or **Logix-compatible tag server / client** — with or without CIP Safety. Tested against real Allen-Bradley ControlLogix and CompactLogix PLCs as well as 1734 distributed safety I/O modules.
+[![PyPI](https://img.shields.io/pypi/v/cm-ethernetip)](https://pypi.org/project/cm-ethernetip/)
+[![Downloads](https://img.shields.io/pypi/dm/cm-ethernetip)](https://pypi.org/project/cm-ethernetip/)
+[![Python](https://img.shields.io/pypi/pyversions/cm-ethernetip)](https://pypi.org/project/cm-ethernetip/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
+<!-- TODO: publish 0.2.0 to PyPI. pyproject.toml is 0.2.0; the published release is 0.1.0, so the badge shows 0.1.0 until then. -->
+
+A complete EtherNet/IP and CIP Safety protocol stack written in Python 3 (asyncio). Acts as **adapter** (target / I/O slave), **scanner** (originator / I/O master), or **Logix-compatible tag server / client** — with or without CIP Safety. Tested against real Allen-Bradley ControlLogix and CompactLogix PLCs as well as 1734 distributed safety I/O modules. Pure-Python port of [EthernetIpSharp](https://github.com/CristianMori/EthernetIpSharp); siblings [EthernetIpRust](https://github.com/CristianMori/EthernetIpRust) and [EthernetIpCpp](https://github.com/CristianMori/EthernetIpCpp) share the same architecture and are wire-compatible.
 
 The library is organised into independent subpackages so you can use only the parts you need: import `ethernetip.cip` if you just want a CIP message router, add `ethernetip.device` for I/O assemblies, layer on `ethernetip.safety` if you need a SIL-3-style safety connection, or use `ethernetip.logix` for symbolic tag access against a real PLC.
 
-This is a pure-Python port of [EthernetIPSharp](../EthernetIPSharp). All three ports (C#, Python, C++) share the same architecture and are wire-compatible.
+## Install
+
+```bash
+pip install cm-ethernetip
+```
+
+Pure Python ≥3.10, no runtime dependencies. The PyPI project is [`cm-ethernetip`](https://pypi.org/project/cm-ethernetip/) (the name `ethernetip` is a different package); import this library as `ethernetip`. For development: `pip install -e ".[dev]"`.
+
+## 30-second quickstart
+
+Read one DINT from a ControlLogix CPU in slot 0, reached through the chassis EtherNet/IP module. `path="1,0"` is the libplctag-style route: backplane port 1, link address 0.
+
+```python
+import asyncio
+from ethernetip.logix.tag_client import TagClient
+
+async def main():
+    # 1756-EN2T at .96, CPU at slot 0.
+    async with TagClient("192.168.1.96", path="1,0") as client:
+        print(await client.read_dint("rate"))
+
+asyncio.run(main())
+```
+
+<!-- TODO: add a terminal GIF of reading tags from a real controller. -->
+
+Arrays, UDTs, browsing, and Class 3 polling are in [Logix tag client](#logix-tag-client). Adapter, scanner, and CIP Safety examples follow under [Quick start](#quick-start).
 
 ---
 
 ## Table of contents
 
+- [Install](#install)
+- [30-second quickstart](#30-second-quickstart)
 - [Features](#features)
 - [Architecture](#architecture)
 - [Project layout](#project-layout)
@@ -26,6 +61,7 @@ This is a pure-Python port of [EthernetIPSharp](../EthernetIPSharp). All three p
 - [CIP services supported](#cip-services-supported)
 - [CIP Safety details](#cip-safety-details)
 - [Known limitations](#known-limitations)
+- [Related projects](#related-projects)
 - [License](#license)
 
 ---
@@ -566,6 +602,18 @@ The full safety ownership state machine (Propose_TUNID / Apply_TUNID / Configure
 - Assembly Object contents are in-memory only (tag values persist via `persistence.save` / `load`).
 - Originator-side connection bridging through multiple hops is not implemented.
 - Safety reset / safety configuration apply services are wired in but not extensively interop-tested.
+
+---
+
+## Related projects
+
+Part of a family of open-source robotics / industrial-automation libraries by @CristianMori:
+
+- **EtherNet/IP + CIP Safety:** [Python](https://github.com/CristianMori/EthernetIpPython) · [C#](https://github.com/CristianMori/EthernetIpSharp) · [Rust](https://github.com/CristianMori/EthernetIpRust) · [C++](https://github.com/CristianMori/EthernetIpCpp)
+- **PLC tooling:** [MoriFixPlc](https://github.com/CristianMori/MoriFixPlc) (portable PLC HAL) · [EscaFlow](https://github.com/CristianMori/Mori.EscaFlow) (PLC transpiler)
+- **ROS in pure C#:** [Mori.RosSharp](https://github.com/CristianMori/Mori.RosSharp) (ROS 1) · [Mori.Ros2Sharp](https://github.com/CristianMori/Mori.Ros2Sharp) (ROS 2)
+- **Simulation & vision:** [GemelliStudio](https://github.com/CristianMori/GemelliStudio) · [LocateAnythingSharp](https://github.com/CristianMori/LocateAnythingSharp) · [Mori.SkyScope](https://github.com/CristianMori/Mori.SkyScope)
+- **AI agents:** [Deckhand](https://github.com/CristianMori/DeckHand)
 
 ---
 
