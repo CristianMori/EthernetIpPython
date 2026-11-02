@@ -166,6 +166,22 @@ async def _spawn_server(port: int) -> tuple[EipAdapter, asyncio.Task]:
     buf[aoi_tpl.members[2].byte_offset] = 0  # Done = False
     struct.pack_into("<i", buf, aoi_tpl.members[3].byte_offset, 7)
     my_aoi.set_data(bytes(buf))
+
+    # Program-scoped tags: pycomm3 enumerates them under the "Program:<name>."
+    # prefix and reads/writes them via that prefix.  Register a program,
+    # a scalar inside it, and a UDT inside it with the same Motor shape so
+    # we exercise member access too.
+    tags.register_program("MainProgram")
+    p_dint = tags.add_program_tag("MainProgram", "LocalDint", dt.DINT)
+    p_dint.set_data(struct.pack("<i", 42))
+    p_real = tags.add_program_tag("MainProgram", "LocalReal", dt.REAL)
+    p_real.set_data(struct.pack("<f", 3.14))
+    p_motor = tags.add_program_struct_tag("MainProgram", "LocalMotor", motor_tpl)
+    buf = bytearray(motor_tpl.structure_size)
+    struct.pack_into("<f", buf, 0, 2.5)
+    buf[4] = 1   # Fault
+    struct.pack_into("<i", buf, 8, 99)
+    p_motor.set_data(bytes(buf))
     # ----------------------------------------------------------------------
 
     dispatcher = LogixDispatcher(tags=tags, identity=identity)
@@ -204,7 +220,7 @@ def _values_match(ty_code: int, got, expected) -> bool:
 def _pycomm3_worker(port: int, out: dict) -> None:
     from pycomm3 import LogixDriver
     try:
-        with LogixDriver(f"127.0.0.1:{port}", init_tags=True, init_program_tags=False) as plc:
+        with LogixDriver(f"127.0.0.1:{port}", init_tags=True, init_program_tags=True) as plc:
             out["tag_names"] = sorted(plc.tags.keys())
             per_type = {}
             for name, ty, initial, write_val in TYPES:
@@ -328,6 +344,48 @@ def _pycomm3_worker(port: int, out: dict) -> None:
             check("TIMER MyTimer.PRE write", not w.error and r.value == 2000, {"w": w.error, "back": r.value})
             w = plc.write(("MyTimer.EN", False)); r = plc.read("MyTimer.EN")
             check("TIMER MyTimer.EN write", not w.error and bool(r.value) is False, {"w": w.error, "back": r.value})
+
+            # Program-scoped tags.  pycomm3 enumerates them with
+            # init_program_tags=True (default) and reads/writes them under
+            # the "Program:<name>." prefix.  Covers:
+            #   * atomic read + write
+            #   * UDT whole-struct read (returns dict)
+            #   * UDT member read + write
+            #   * BOOL member in a program-scoped UDT
+            check("program atomic read",
+                  (plc.read("Program:MainProgram.LocalDint").value == 42),
+                  "Program:MainProgram.LocalDint")
+            w = plc.write(("Program:MainProgram.LocalDint", 100))
+            r = plc.read("Program:MainProgram.LocalDint")
+            check("program atomic write", not w.error and r.value == 100,
+                  {"w": w.error, "back": r.value})
+            r = plc.read("Program:MainProgram.LocalReal")
+            check("program REAL read", not r.error and abs(r.value - 3.14) < 1e-5,
+                  {"err": r.error, "val": r.value})
+            r = plc.read("Program:MainProgram.LocalMotor")
+            check("program UDT whole-struct",
+                  not r.error and isinstance(r.value, dict)
+                  and abs(r.value["Speed"] - 2.5) < 1e-5
+                  and r.value["Fault"] is True
+                  and r.value["RunCount"] == 99,
+                  {"err": r.error, "val": r.value})
+            r = plc.read("Program:MainProgram.LocalMotor.Speed")
+            check("program UDT member read",
+                  not r.error and abs(r.value - 2.5) < 1e-5,
+                  {"err": r.error, "val": r.value})
+            w = plc.write(("Program:MainProgram.LocalMotor.Speed", 5.5))
+            r = plc.read("Program:MainProgram.LocalMotor.Speed")
+            check("program UDT member write",
+                  not w.error and abs(r.value - 5.5) < 1e-5,
+                  {"w": w.error, "back": r.value})
+            r = plc.read("Program:MainProgram.LocalMotor.Fault")
+            check("program UDT BOOL member",
+                  not r.error and bool(r.value) is True,
+                  {"err": r.error, "val": r.value})
+            # pycomm3 also populates plc.info['programs'] with the discovered program
+            check("program listed in plc.info",
+                  "MainProgram" in plc.info.get("programs", {}),
+                  plc.info.get("programs"))
 
             # AOI-backing UDT — same mechanism, confirming AOI tags are not
             # special on the wire.
