@@ -40,7 +40,10 @@ class EipAdapter:
     T→O items on the reply.
     """
 
-    def __init__(self, dispatch, identity: IdentityInfo, sessions=None, identity_source=None):
+    def __init__(self, dispatch, identity: IdentityInfo, sessions=None, identity_source=None,
+                 max_connections: int = 64,
+                 max_sessions_per_connection: int = 4,
+                 idle_timeout: float = 60.0):
         self._dispatch = dispatch
         self._identity = identity
         self._sessions = sessions or SessionManager()
@@ -55,6 +58,17 @@ class EipAdapter:
         # connection_id — fine for loopback tests but rejected by Logix MSG
         # instructions (which see "not for me" and time out).
         self.connection_id_lookup: Callable[[int], int] | None = None
+
+        # Resource caps. Without these a hostile peer can:
+        #  * open thousands of TCP sockets (no built-in cap in asyncio),
+        #  * register unbounded sessions per socket (SessionManager grows
+        #    forever on repeated RegisterSession),
+        #  * hold a socket open after a partial frame (reader.read() awaits
+        #    forever if no bytes ever arrive).
+        self.max_connections = max_connections
+        self.max_sessions_per_connection = max_sessions_per_connection
+        self.idle_timeout = idle_timeout
+        self._active_connections = 0
 
     async def listen(self, host: str = '0.0.0.0', port: int = DEFAULT_PORT) -> None:
         self.port = port
@@ -79,7 +93,18 @@ class EipAdapter:
         await self.close()
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # Hard cap on concurrent TCP peers. asyncio.start_server has no
+        # built-in limit; without this an attacker can exhaust fds / RAM
+        # by opening sockets and never sending bytes.
+        if self._active_connections >= self.max_connections:
+            logger.debug("rejecting connection: active=%d max=%d",
+                         self._active_connections, self.max_connections)
+            writer.close()
+            return
+        self._active_connections += 1
+
         session_handle = 0
+        session_handles: list[int] = []  # all handles registered on this socket
         peername = writer.get_extra_info('peername', ('0.0.0.0', 0))
         sockname = writer.get_extra_info('sockname', ('0.0.0.0', 0))
         local_addr = sockname[0]
@@ -87,7 +112,15 @@ class EipAdapter:
 
         try:
             while True:
-                chunk = await reader.read(4096)
+                try:
+                    chunk = await asyncio.wait_for(
+                        reader.read(4096), timeout=self.idle_timeout)
+                except asyncio.TimeoutError:
+                    # Slow-loris read guard: a peer that goes silent after
+                    # opening the socket (or mid-frame) must not hold the
+                    # task forever.
+                    logger.debug("idle timeout from %r", peername)
+                    break
                 if not chunk:
                     break
                 accum.extend(chunk)
@@ -110,25 +143,39 @@ class EipAdapter:
                     raw_header = bytes(accum[:HEADER_SIZE])
                     del accum[:consumed]
 
-                    try:
-                        response = self._dispatch_message(msg, session_handle, local_addr)
-                    except Exception:
-                        # Any parse / struct / decode error raised deep in a
-                        # handler (UnicodeDecodeError from a 0x91 symbolic
-                        # segment, ValueError from truncated paths, …) used
-                        # to tear down the whole connection task. Reply with
-                        # a protocol-level error and keep serving.
-                        logger.debug("dispatch raised for %r", msg, exc_info=True)
+                    # Cap sessions per TCP connection. SessionManager has no
+                    # per-connection accounting, so a peer that spams
+                    # RegisterSession would leak handles until the process
+                    # dies.
+                    if isinstance(msg, RegisterSessionMessage) and \
+                            len(session_handles) >= self.max_sessions_per_connection:
                         hdr = EncapsulationHeader.parse(raw_header)
                         response = _build_error_response(
                             hdr.command, hdr.session_handle,
-                            hdr.sender_context, EncapsulationStatus.INCORRECT_DATA)
+                            hdr.sender_context, EncapsulationStatus.INSUFFICIENT_MEMORY)
+                    else:
+                        try:
+                            response = self._dispatch_message(msg, session_handle, local_addr)
+                        except Exception:
+                            # Any parse / struct / decode error raised deep in a
+                            # handler (UnicodeDecodeError from a 0x91 symbolic
+                            # segment, ValueError from truncated paths, …) used
+                            # to tear down the whole connection task. Reply with
+                            # a protocol-level error and keep serving.
+                            logger.debug("dispatch raised for %r", msg, exc_info=True)
+                            hdr = EncapsulationHeader.parse(raw_header)
+                            response = _build_error_response(
+                                hdr.command, hdr.session_handle,
+                                hdr.sender_context, EncapsulationStatus.INCORRECT_DATA)
 
                     if isinstance(msg, RegisterSessionMessage) and response and \
                             EncapsulationHeader.parse(response).status == EncapsulationStatus.SUCCESS:
                         # Pick up the freshly-allocated handle for subsequent frames
                         session_handle = EncapsulationHeader.parse(response).session_handle
+                        session_handles.append(session_handle)
                     elif isinstance(msg, UnregisterSessionMessage):
+                        if session_handle in session_handles:
+                            session_handles.remove(session_handle)
                         session_handle = 0
 
                     if response is not None:
@@ -138,9 +185,15 @@ class EipAdapter:
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
             pass
         finally:
-            if session_handle != 0:
+            # Release every handle we opened on this socket, not just the
+            # most recent one. Earlier code assumed a single active handle
+            # per connection and leaked the rest.
+            for handle in session_handles:
+                self._sessions.unregister(handle)
+            if session_handle != 0 and session_handle not in session_handles:
                 self._sessions.unregister(session_handle)
             writer.close()
+            self._active_connections -= 1
 
     def _dispatch_message(self, msg: IMessage, session_handle: int, local_addr: str) -> bytes | None:
         """Route a parsed message to its handler. Returns response bytes or None."""

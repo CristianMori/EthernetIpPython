@@ -35,9 +35,14 @@ UNCONNECTED_SEND_SERVICE = 0x52
 class ConnectionManagerObject:
     """CIP Connection Manager — handles Forward Open/Close and Unconnected Send."""
 
-    def __init__(self):
+    def __init__(self, max_connections: int = 64):
         self._cip_class = CipClass(CLASS_CODE, "Connection Manager", revision=1)
         self._cip_class.add_standard_instance_services()
+        # Hard cap on simultaneous IoConnections. The duplicate-triad check
+        # at _process_forward_open is bypassable by varying serial/vendor,
+        # so without a count cap a peer can allocate connection resources
+        # (and run on_connection_established callbacks) without bound.
+        self.max_connections = max_connections
 
         inst = self._cip_class.create_instance(1)
         for i in range(1, 9):
@@ -122,6 +127,13 @@ class ConnectionManagerObject:
                     existing.originator_vendor_id == fwd_open.originator_vendor_id and
                     existing.originator_serial_number == fwd_open.originator_serial_number):
                 return _forward_open_error(request.service_code, 0x0100)
+
+        # Resource cap — refuse with "No more connection resources available"
+        # once we're already serving max_connections. Enforced after the
+        # duplicate-triad check so a legitimate re-open still gets its
+        # specific error.
+        if len(self._connections) >= self.max_connections:
+            return _forward_open_error(request.service_code, 0x0113)
 
         with self._lock:
             self._next_connection_id += 1
