@@ -70,6 +70,25 @@ def handle_write_tag(tag: Tag, service_code: int, data: bytes,
 
     byte_offset = element_offset * tag.element_size
     bytes_to_write = element_count * tag.element_size
+
+    # pycomm3 writes SHORT_STRING as [length_byte][chars] with no fixed-slot
+    # padding, so the payload is 1 + N bytes rather than the full 81-byte
+    # element.  Accept the shorter write and pad the remainder of the slot
+    # with zeros so Read_Tag returns the same value back.  Studio 5000 does
+    # the same on Identity attribute 7, which is the only place real Logix
+    # actually exposes SHORT_STRING; application tags of this type are a
+    # convenience the server adds on top.
+    if tag_type == 0x00DA and len(data) >= header_len + 1:
+        length_byte = data[header_len]
+        provided = len(data) - header_len
+        expected_short = 1 + length_byte
+        if provided >= expected_short and provided < bytes_to_write:
+            payload = bytes(data[header_len:header_len + provided]) + bytes(bytes_to_write - provided)
+            if byte_offset + bytes_to_write > tag.data_size:
+                return CipServiceResponse.error(service_code, CipStatus.error(0xFF, 0x2105))
+            tag.set_data(payload, byte_offset)
+            return CipServiceResponse.success(service_code)
+
     if len(data) < header_len + bytes_to_write:
         return CipServiceResponse.error(service_code, CipStatus.error(0x13))
 
