@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 import asyncio
+import logging
 import struct
 import socket
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 from ..cip.encapsulation import (
     EncapsulationHeader, EncapsulationCommand, EncapsulationStatus, SIZE as HEADER_SIZE,
@@ -91,12 +94,35 @@ class EipAdapter:
 
                 # Drain as many complete frames as we have buffered.
                 while True:
-                    msg, consumed = self._manager.try_parse(bytes(accum), peername)
+                    # Parsing the header itself can raise on an unknown
+                    # command/status byte. Without a parsed header we can't
+                    # frame a reply, so close the connection cleanly.
+                    try:
+                        msg, consumed = self._manager.try_parse(bytes(accum), peername)
+                    except Exception:
+                        logger.debug("encapsulation header parse failed", exc_info=True)
+                        return
                     if msg is None:
                         break
+                    # Keep the raw header bytes — if dispatch throws we still
+                    # need the command/handle/context to frame a protocol
+                    # error reply instead of silently killing the task.
+                    raw_header = bytes(accum[:HEADER_SIZE])
                     del accum[:consumed]
 
-                    response = self._dispatch_message(msg, session_handle, local_addr)
+                    try:
+                        response = self._dispatch_message(msg, session_handle, local_addr)
+                    except Exception:
+                        # Any parse / struct / decode error raised deep in a
+                        # handler (UnicodeDecodeError from a 0x91 symbolic
+                        # segment, ValueError from truncated paths, …) used
+                        # to tear down the whole connection task. Reply with
+                        # a protocol-level error and keep serving.
+                        logger.debug("dispatch raised for %r", msg, exc_info=True)
+                        hdr = EncapsulationHeader.parse(raw_header)
+                        response = _build_error_response(
+                            hdr.command, hdr.session_handle,
+                            hdr.sender_context, EncapsulationStatus.INCORRECT_DATA)
 
                     if isinstance(msg, RegisterSessionMessage) and response and \
                             EncapsulationHeader.parse(response).status == EncapsulationStatus.SUCCESS:
