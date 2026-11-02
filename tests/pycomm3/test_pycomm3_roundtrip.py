@@ -23,7 +23,7 @@ pycomm3 = pytest.importorskip("pycomm3")
 from ethernetip.cip.identity_info import IdentityInfo
 from ethernetip.logix import data_types as dt
 from ethernetip.logix.logix_dispatcher import LogixDispatcher
-from ethernetip.logix.tag_database import TagDatabase
+from ethernetip.logix.tag_database import TagDatabase, TemplateMember
 from ethernetip.protocol.eip_adapter import EipAdapter
 
 
@@ -93,6 +93,46 @@ async def _spawn_server(port: int) -> tuple[EipAdapter, asyncio.Task]:
     for name, ty, initial, _ in TYPES:
         _seed_tag(tags.add_tag(name, ty), ty, initial)
     tags.add_tag("TestShortString", dt.SHORT_STRING)
+
+    # ---- Yellow-row coverage ---------------------------------------------
+    # 1-D array of atomics, bit of atomic, BOOL array, multi-dim array.
+    arr = tags.add_tag("DintArr", dt.DINT, element_count=10)
+    arr.set_data(b"".join(struct.pack("<i", 100 + i) for i in range(10)))
+    tags.add_tag("FlagsDint", dt.DINT).set_data(struct.pack("<I", 0b1010_1010_1010_1010))
+    tags.add_tag("Flags32", dt.BOOL, element_count=32)
+    mat = tags.add_tag("Matrix", dt.DINT, dims=(2, 3))
+    mat.set_data(b"".join(struct.pack("<i", 10 * r + c) for r in range(2) for c in range(3)))
+
+    # Logix STRING UDT (LEN:DINT + DATA:SINT[82], 88 bytes).
+    string_tpl = tags.add_template(
+        "STRING",
+        TemplateMember("LEN", dt.DINT),
+        TemplateMember("DATA", dt.SINT, array_size=82),
+    )
+    greet = tags.add_struct_tag("Greeting", string_tpl)
+    buf = bytearray(88)
+    hello = b"Hello pycomm3"
+    struct.pack_into('<i', buf, 0, len(hello))
+    buf[4:4 + len(hello)] = hello
+    greet.set_data(bytes(buf))
+    tags.add_struct_tag("GreetingArr", string_tpl, element_count=3)
+
+    # User UDT with atomic + BOOL + atomic.
+    motor_tpl = tags.add_template(
+        "Motor",
+        TemplateMember("Speed", dt.REAL),
+        TemplateMember("Fault", dt.BOOL),
+        TemplateMember("RunCount", dt.DINT),
+    )
+    motor_a = tags.add_struct_tag("MotorA", motor_tpl)
+    buf = bytearray(motor_tpl.structure_size)
+    struct.pack_into("<f", buf, 0, 3.14)
+    buf[4] = 1
+    struct.pack_into("<i", buf, 8, 42)
+    motor_a.set_data(bytes(buf))
+    tags.add_struct_tag("MotorArr", motor_tpl, element_count=3)
+    # ----------------------------------------------------------------------
+
     dispatcher = LogixDispatcher(tags=tags, identity=identity)
     adapter = EipAdapter(dispatcher, identity)
     task = asyncio.create_task(adapter.listen("127.0.0.1", port))
@@ -166,6 +206,94 @@ def _pycomm3_worker(port: int, out: dict) -> None:
                     r2 = plc.read("TestShortString")
                     per_type["TestShortString"] = ("ok" if r2.value == "hello" else "mismatch",
                                                      {"back": r2.value})
+
+            # --- Yellow rows ---------------------------------------------------
+            def check(label: str, cond: bool, detail=""):
+                per_type[label] = ("ok" if cond else "mismatch", detail)
+
+            # Row 17: 1-D array indexed read/write
+            r = plc.read("DintArr[5]"); check("17 DintArr[5] read", not r.error and r.value == 105, r)
+            w = plc.write(("DintArr[5]", 999)); r2 = plc.read("DintArr[5]")
+            check("17 DintArr[5] round-trip", not w.error and r2.value == 999, {"w": w.error, "back": r2.value})
+
+            # Row 18: whole array
+            r = plc.read("DintArr{10}")
+            check("18 DintArr{10}", not r.error and list(r.value)[0] == 100 and list(r.value)[9] == 109,
+                  {"err": r.error, "vals": list(r.value) if r.value else None})
+
+            # Row 19 + 20: fragmented read + write
+            w = plc.write(("DintArr{10}", list(range(1000, 1010))))
+            r = plc.read("DintArr{10}")
+            check("19-20 fragmented r/w", not w.error and list(r.value) == list(range(1000, 1010)),
+                  {"w": w.error, "back": list(r.value) if r.value else None})
+
+            # Row 21: bit of atomic
+            r = plc.read("FlagsDint.1"); check("21 FlagsDint.1 read", not r.error and bool(r.value) is True, r)
+            w = plc.write(("FlagsDint.0", True)); r2 = plc.read("FlagsDint.0")
+            check("21 FlagsDint bit write", not w.error and bool(r2.value) is True, {"w": w.error, "back": r2.value})
+
+            # Row 22: BOOL array
+            r = plc.read("Flags32[3]")
+            check("22 Flags32[3] read", not r.error, {"err": r.error, "val": r.value})
+            w = plc.write(("Flags32[7]", True)); r2 = plc.read("Flags32[7]")
+            check("22 Flags32 bit write", not w.error and bool(r2.value) is True, {"w": w.error, "back": r2.value})
+
+            # Row 23: multi-dim array
+            r = plc.read("Matrix[1,2]")
+            check("23 Matrix[1,2] read", not r.error and r.value == 12, {"err": r.error, "val": r.value})
+            w = plc.write(("Matrix[0,1]", 777)); r2 = plc.read("Matrix[0,1]")
+            check("23 Matrix write", not w.error and r2.value == 777, {"w": w.error, "back": r2.value})
+
+            # Row 24: Logix STRING UDT whole-struct round-trip
+            r = plc.read("Greeting")
+            check("24 Greeting read", not r.error and r.value == "Hello pycomm3", {"err": r.error, "val": r.value})
+            w = plc.write(("Greeting", "written back")); r2 = plc.read("Greeting")
+            check("24 Greeting round-trip", not w.error and r2.value == "written back",
+                  {"w": w.error, "back": r2.value})
+
+            # Row 25: STRING array
+            w = plc.write(("GreetingArr[1]", "second"))
+            r = plc.read("GreetingArr[1]")
+            check("25 GreetingArr[1]", not w.error and not r.error and r.value == "second",
+                  {"w": w.error, "r": r.error, "val": r.value})
+
+            # Row 26: UDT whole-struct read
+            r = plc.read("MotorA")
+            check("26 MotorA whole-struct",
+                  not r.error and isinstance(r.value, dict) and abs(r.value["Speed"] - 3.14) < 1e-4 and r.value["Fault"] is True and r.value["RunCount"] == 42,
+                  {"err": r.error, "val": r.value})
+
+            # Row 27: UDT member access
+            r = plc.read("MotorA.Speed")
+            check("27 MotorA.Speed", not r.error and abs(r.value - 3.14) < 1e-5, {"err": r.error, "val": r.value})
+            r = plc.read("MotorA.RunCount")
+            check("27 MotorA.RunCount", not r.error and r.value == 42, {"err": r.error, "val": r.value})
+            w = plc.write(("MotorA.Speed", -1.5)); r2 = plc.read("MotorA.Speed")
+            check("27 MotorA.Speed write", not w.error and abs(r2.value - (-1.5)) < 1e-5, {"w": w.error, "back": r2.value})
+
+            # Row 29: BOOL member of UDT
+            r = plc.read("MotorA.Fault")
+            check("29 MotorA.Fault read", not r.error and bool(r.value) is True, {"err": r.error, "val": r.value})
+            w = plc.write(("MotorA.Fault", False)); r2 = plc.read("MotorA.Fault")
+            check("29 MotorA.Fault write", not w.error and bool(r2.value) is False, {"w": w.error, "back": r2.value})
+
+            # Row 31: array of UDTs with member access
+            w = plc.write(("MotorArr[1].Speed", 7.77))
+            r = plc.read("MotorArr[1].Speed")
+            check("31 MotorArr[1].Speed", not w.error and not r.error and abs(r.value - 7.77) < 1e-4,
+                  {"w": w.error, "r": r.error, "val": r.value})
+
+            # Row 39-40: multi-service batch read & write
+            batch = plc.read("DintArr[0]", "DintArr[1]", "DintArr[2]")
+            check("39 batch read",
+                  all(not t.error for t in batch) and [t.value for t in batch] == [1000, 1001, 1002],
+                  [(t.tag, t.value, t.error) for t in batch])
+            res = plc.write(("DintArr[0]", 5000), ("DintArr[1]", 5001), ("DintArr[2]", 5002))
+            r = plc.read("DintArr[0]", "DintArr[1]", "DintArr[2]")
+            check("40 batch write",
+                  all(not t.error for t in res) and [t.value for t in r] == [5000, 5001, 5002],
+                  {"res_errs": [t.error for t in res], "back": [t.value for t in r]})
+
             out["per_type"] = per_type
     except Exception as exc:
         import traceback
