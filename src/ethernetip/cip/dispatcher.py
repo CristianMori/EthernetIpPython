@@ -1,12 +1,38 @@
 """CIP dispatcher — routes requests through the CIP class/instance/service tree."""
 
 from __future__ import annotations
+import contextvars
 from typing import Protocol, runtime_checkable
 
 from .cip_class import CipClass
 from .path import CipPath
 from .service import CipServiceRequest, CipServiceResponse
 from .status import CipStatus, PATH_DESTINATION_UNKNOWN, OBJECT_DOES_NOT_EXIST, SERVICE_NOT_SUPPORTED
+
+
+# Guards server-side request dispatch against malicious nesting of
+# Multiple_Service_Packet / Unconnected_Send. A benign request has depth 0;
+# one legitimate layer of nesting is depth 1. Real clients never go deeper,
+# but an attacker-crafted request can recurse without bound and raise
+# RecursionError, killing the connection task (effectively a DoS). Both
+# sub-dispatch call sites check this before re-entering dispatch.
+MAX_SUBREQUEST_DEPTH = 3
+
+_subrequest_depth: contextvars.ContextVar[int] = contextvars.ContextVar(
+    '_cip_subrequest_depth', default=0)
+
+
+def current_subrequest_depth() -> int:
+    return _subrequest_depth.get()
+
+
+def enter_subrequest():
+    """Context-manager-ish helper: returns a token to pass back to reset()."""
+    return _subrequest_depth.set(_subrequest_depth.get() + 1)
+
+
+def leave_subrequest(token) -> None:
+    _subrequest_depth.reset(token)
 
 
 @runtime_checkable

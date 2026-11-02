@@ -10,9 +10,15 @@ from ..cip.instance import CipInstance
 from ..cip.attribute import CipAttribute, AttributeAccess
 from ..cip.data_types import CipDataType
 from ..cip.service import CipServiceDefinition, CipServiceRequest, CipServiceResponse
-from ..cip.status import CipStatus, NOT_ENOUGH_DATA, SERVICE_NOT_SUPPORTED, PATH_SEGMENT_ERROR
+from ..cip.status import CipStatus, NOT_ENOUGH_DATA, SERVICE_NOT_SUPPORTED, PATH_SEGMENT_ERROR, INVALID_PARAMETER
 from ..cip.path import CipPath
 from ..cip import mr_codec
+from ..cip.dispatcher import (
+    MAX_SUBREQUEST_DEPTH,
+    current_subrequest_depth,
+    enter_subrequest,
+    leave_subrequest,
+)
 
 from .io_connection import IoConnection, ConnectionState
 from .forward_open_request import ForwardOpenRequest
@@ -234,7 +240,16 @@ class ConnectionManagerObject:
             return CipServiceResponse.error(request.service_code, CipStatus.error(PATH_SEGMENT_ERROR))
 
         svc, path, inner_data = result
-        return self.dispatch_request(svc, path, inner_data)
+        # Reject attacker-crafted nested Unconnected_Send /
+        # Multiple_Service_Packet chains that would recurse without bound
+        # and raise RecursionError, killing the connection task.
+        if current_subrequest_depth() >= MAX_SUBREQUEST_DEPTH:
+            return CipServiceResponse.error(svc, CipStatus.error(INVALID_PARAMETER))
+        token = enter_subrequest()
+        try:
+            return self.dispatch_request(svc, path, inner_data)
+        finally:
+            leave_subrequest(token)
 
 
 def _forward_open_error(service_code: int, extended_status: int) -> CipServiceResponse:
