@@ -31,7 +31,14 @@ class SymbolObject:
         self.cip_class.add_instance_service(CipServiceDefinition(ts.WRITE_TAG_FRAGMENTED, "Write_Tag_Fragmented", self._handle_write_frag))
         self.cip_class.add_instance_service(CipServiceDefinition(ts.READ_MODIFY_WRITE, "Read_Modify_Write", self._handle_rmw))
 
+        # Register browse (0x55) at BOTH class and instance level: pycomm3 and
+        # Studio 5000 continue pagination by sending the service with
+        # instance_id = last_seen + 1, which routes as an instance-level call.
+        # The handler itself treats request.path.instance_id as the start
+        # cursor, so the same handler is correct in both places.
         self.cip_class.add_class_service(CipServiceDefinition(
+            GET_INSTANCE_ATTRIBUTE_LIST, "Get_Instance_Attribute_List", self._handle_browse))
+        self.cip_class.add_instance_service(CipServiceDefinition(
             GET_INSTANCE_ATTRIBUTE_LIST, "Get_Instance_Attribute_List", self._handle_browse))
 
     def ensure_instance(self, tag: Tag) -> None:
@@ -116,8 +123,12 @@ class SymbolObject:
         tags_packed = 0
         truncated = False
 
+        # pycomm3 (and Studio 5000) resumes pagination by sending
+        # instance_id = last_seen + 1 and expects THAT instance to be the first
+        # one in the next page.  Filtering with `> start_instance` drops the
+        # exact tag the client asked for; use >= here.
         sorted_tags = [t for t in sorted(self._tags.all_tags, key=lambda t: t.instance_id)
-                        if t.instance_id > start_instance]
+                        if t.instance_id >= start_instance]
 
         for tag in sorted_tags:
             self.ensure_instance(tag)
