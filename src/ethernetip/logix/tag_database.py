@@ -284,6 +284,39 @@ class TagDatabase:
         scope.tags[name.lower()] = tag
         return tag
 
+    def add_program_struct_tag(self, program: str, name: str,
+                                 template: TemplateDefinition,
+                                 element_count: int = 1,
+                                 dims: tuple[int, ...] | None = None) -> Tag:
+        """Add a structured tag inside a program scope.  Mirrors
+        ``add_struct_tag`` but places the tag in the per-program table so it
+        answers to ``Program:<prog>.<name>`` instead of controller scope.
+        """
+        scope = self._programs.get(program)
+        if scope is None:
+            raise ValueError(f"program '{program}' not registered")
+        if name.lower() in {n.lower() for n in scope.tags}:
+            raise ValueError(f"tag '{name}' already exists in program '{program}'")
+        if dims is not None:
+            if not 1 <= len(dims) <= 3:
+                raise ValueError("dims must have 1, 2, or 3 entries")
+            element_count = 1
+            for d in dims:
+                element_count *= d
+        else:
+            dims = (element_count,) if element_count > 1 else ()
+        inst = scope.next_instance
+        scope.next_instance += 1
+        array_dims = len(dims) if dims else 0
+        symbol_type = dt.make_struct_symbol_type(template.instance_id, array_dims=array_dims)
+        tag = Tag(
+            inst, name, symbol_type, template.struct_handle,
+            template.structure_size, element_count, dims=dims,
+        )
+        tag.template = template
+        scope.tags[name.lower()] = tag
+        return tag
+
     def find_program_tag(self, program: str, name: str) -> Tag | None:
         scope = self._programs.get(program)
         if scope is None:
