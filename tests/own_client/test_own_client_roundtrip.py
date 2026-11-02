@@ -33,7 +33,10 @@ def _grab_free_port() -> int:
         return s.getsockname()[1]
 
 
-async def _spawn_server(port: int) -> tuple[EipAdapter, asyncio.Task, TagDatabase]:
+async def _spawn_server(port: int) -> tuple[
+    EipAdapter, asyncio.Task, TagDatabase,
+    "object", "object",  # string template, motor template — carry instance_ids
+]:
     """Build the same tag landscape the pycomm3 test uses."""
     identity = IdentityInfo(
         vendor_id=1, device_type=0x0E, product_code=65,
@@ -138,7 +141,7 @@ async def _spawn_server(port: int) -> tuple[EipAdapter, asyncio.Task, TagDatabas
     adapter = EipAdapter(dispatcher, identity)
     task = asyncio.create_task(adapter.listen("127.0.0.1", port))
     await asyncio.sleep(0.1)
-    return adapter, task, tags
+    return adapter, task, tags, string_tpl, motor_tpl
 
 
 async def _teardown(adapter: EipAdapter, task: asyncio.Task) -> None:
@@ -151,7 +154,7 @@ async def _teardown(adapter: EipAdapter, task: asyncio.Task) -> None:
 @pytest.mark.asyncio
 async def test_tag_client_full_matrix():
     port = _grab_free_port()
-    adapter, task, _ = await _spawn_server(port)
+    adapter, task, _tags, string_tpl, motor_tpl = await _spawn_server(port)
     failures: list[str] = []
     try:
         client = TagClient("127.0.0.1", port)
@@ -188,7 +191,7 @@ async def test_tag_client_full_matrix():
             assert await client.read_string("Greeting") == "Hello client"
             # Discover the STRING template's structure handle before writing
             # (the client requires it, mirroring Studio 5000's behaviour).
-            string_tpl_info = await client.read_template(257)
+            string_tpl_info = await client.read_template(string_tpl.instance_id)
             await client.write_string("Greeting", "written back",
                                        structure_handle=string_tpl_info.structure_handle)
             assert await client.read_string("Greeting") == "written back"
@@ -208,10 +211,12 @@ async def test_tag_client_full_matrix():
 
         # --- UDT whole-struct + member access ------------------------------
         try:
-            motor_tpl_info = await client.read_template(258)  # Motor is 258
+            motor_tpl_info = await client.read_template(motor_tpl.instance_id)
             sv = await client.read_struct("MotorA", motor_tpl_info)
-            # read_struct returns a StructureValue — just confirm it decoded
-            assert sv is not None
+            # Decode and verify every seeded member — "not None" alone would
+            # pass a struct whose fields decoded to zeros or swapped offsets.
+            assert abs(sv.get_real("Speed") - 3.14) < 1e-5
+            assert sv.get_dint("RunCount") == 42
         except Exception as exc:
             failures.append(f"MotorA read_struct: {exc!r}")
 
@@ -227,6 +232,10 @@ async def test_tag_client_full_matrix():
         try:
             await client.write_real("MotorArr[1].Speed", 7.77)
             assert abs(await client.read_real("MotorArr[1].Speed") - 7.77) < 1e-4
+            # Neighbors must stay at their initial 0.0 — a server element-offset
+            # bug that smears the write across the array would otherwise pass.
+            assert abs(await client.read_real("MotorArr[0].Speed") - 0.0) < 1e-6
+            assert abs(await client.read_real("MotorArr[2].Speed") - 0.0) < 1e-6
         except Exception as exc:
             failures.append(f"MotorArr member: {exc!r}")
 
@@ -263,6 +272,14 @@ async def test_tag_client_full_matrix():
         try:
             got = await client.read_multiple(["DintArr[0]", "DintArr[1]", "DintArr[2]"])
             assert len(got) == 3
+            # Decode and verify each value — the seed set DintArr[i] = 100 + i,
+            # so a multi-service slicing bug that returned three identical
+            # blobs would otherwise slip through.
+            for i in range(3):
+                raw = got[f"DintArr[{i}]"]
+                # Read_Tag payload prefixes the atomic value with the UINT type
+                # code (0x00C4 for DINT); the four-byte DINT follows.
+                assert struct.unpack_from('<i', raw, 2)[0] == 100 + i
         except Exception as exc:
             failures.append(f"batch read: {exc!r}")
 
