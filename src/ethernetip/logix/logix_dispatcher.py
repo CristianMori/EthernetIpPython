@@ -198,9 +198,9 @@ def _dispatch_tag_service(tag: Tag, service_code: int, data: bytes,
         case 0x4D:
             return ts.handle_write_tag(tag, service_code, data, element_offset)
         case 0x52:
-            return ts.handle_read_tag_fragmented(tag, service_code, data)
+            return ts.handle_read_tag_fragmented(tag, service_code, data, element_offset)
         case 0x53:
-            return ts.handle_write_tag_fragmented(tag, service_code, data)
+            return ts.handle_write_tag_fragmented(tag, service_code, data, element_offset)
         case 0x4E:
             return ts.handle_read_modify_write(tag, service_code, data)
         case _:

@@ -70,13 +70,15 @@ class SymbolObject:
         tag = self._get_tag(instance)
         if tag is None:
             return CipServiceResponse.error(request.service_code, CipStatus.error(0x05))
-        return ts.handle_read_tag_fragmented(tag, request.service_code, request.data)
+        element_offset = request.path.element_id or 0
+        return ts.handle_read_tag_fragmented(tag, request.service_code, request.data, element_offset)
 
     def _handle_write_frag(self, instance: CipInstance, request: CipServiceRequest) -> CipServiceResponse:
         tag = self._get_tag(instance)
         if tag is None:
             return CipServiceResponse.error(request.service_code, CipStatus.error(0x05))
-        return ts.handle_write_tag_fragmented(tag, request.service_code, request.data)
+        element_offset = request.path.element_id or 0
+        return ts.handle_write_tag_fragmented(tag, request.service_code, request.data, element_offset)
 
     def _handle_rmw(self, instance: CipInstance, request: CipServiceRequest) -> CipServiceResponse:
         tag = self._get_tag(instance)
