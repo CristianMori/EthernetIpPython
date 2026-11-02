@@ -38,9 +38,14 @@ class TemplateObject:
         inst.add_attribute(CipAttribute.create_uint(1, CipDataType.UINT, AttributeAccess.ALL, template.struct_handle))
         inst.add_attribute(CipAttribute.create_uint(2, CipDataType.UINT, AttributeAccess.ALL, template.member_count))
 
-        # Attr 4: definition size in 32-bit words
+        # Attr 4: definition size in 32-bit words.  pycomm3 (and Studio 5000)
+        # computes the Template_Read body size as `(def_size*4) - 21`, treating
+        # 21 bytes as a header that lives inside the "definition" count but is
+        # not part of the body we actually return via service 0x4C.  Match
+        # Logix's convention by sizing attr 4 to make `(def_size*4) - 21` ≥ the
+        # member-data length — rounded up to a 32-bit boundary.
         member_data = self._build_member_data(template)
-        def_size_words = (len(member_data) + 3) // 4
+        def_size_words = (21 + len(member_data) + 3) // 4
         inst.add_attribute(CipAttribute.create_udint(4, CipDataType.UDINT, AttributeAccess.ALL, def_size_words))
 
         # Attr 5: structure size in bytes
@@ -57,8 +62,11 @@ class TemplateObject:
             type_info = (m.data_type << 16) | (m.info & 0xFFFF)
             buf += struct.pack('<II', type_info, m.byte_offset)
 
-        # Template name (null-terminated)
-        buf += template.name.encode('ascii') + b'\x00'
+        # Template name (null-terminated).  Logix exports and pycomm3 both
+        # expect the "<Name>;<crc>" convention — pycomm3 splits on ';' to pull
+        # the name.  Without the ';' pycomm3 appends the name to the member
+        # list as if it were an extra member and the parse fails.
+        buf += template.name.encode('ascii') + b';0' + b'\x00'
 
         # Member names (null-terminated)
         for m in template.members:
@@ -78,8 +86,11 @@ class TemplateObject:
         if len(request.data) < 6:
             return CipServiceResponse.error(request.service_code, CipStatus.error(0x13))
 
-        element_count = struct.unpack_from('<H', request.data, 0)[0]
-        byte_offset = struct.unpack_from('<I', request.data, 2)[0]
+        # CIP Vol 1 §C-5.11 Template_Read request: [Byte_Offset:UDINT][Size:UINT].
+        # Earlier code had these in the wrong order and misread pycomm3's
+        # perfectly-valid request as an out-of-range offset, returning 0x05.
+        byte_offset = struct.unpack_from('<I', request.data, 0)[0]
+        requested_size = struct.unpack_from('<H', request.data, 4)[0]
 
         member_data = self._build_member_data(template)
 
@@ -87,7 +98,7 @@ class TemplateObject:
             return CipServiceResponse.error(request.service_code, CipStatus.error(0x05))
 
         remaining = len(member_data) - byte_offset
-        chunk = min(remaining, 480)
+        chunk = min(remaining, requested_size, 480)
         more = byte_offset + chunk < len(member_data)
 
         resp_data = member_data[byte_offset:byte_offset + chunk]
