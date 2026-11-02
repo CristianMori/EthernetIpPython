@@ -123,11 +123,42 @@ class SymbolObject:
         tags_packed = 0
         truncated = False
 
+        # Program scope: pycomm3 (and Studio 5000) scopes a browse to a
+        # program by prepending an ANSI symbolic segment "Program:<name>"
+        # to the Class 0x6B + Instance path.  Our path parser collects that
+        # into `request.path.symbolic_name`.  When it's set, enumerate only
+        # the tags inside that program; otherwise enumerate controller-scope
+        # tags *plus* one pseudo-tag per registered program so the client
+        # can discover and scope into them.
+        sym = request.path.symbolic_name
+        if sym and sym.startswith("Program:"):
+            prog_name = sym[len("Program:"):]
+            prog = self._tags.find_program(prog_name)
+            if prog is None:
+                return CipServiceResponse.error(request.service_code, CipStatus.error(0x05))
+            source = list(prog.tags.values())
+        else:
+            source = list(self._tags.all_tags)
+            # Synthesize a `Program:<name>` pseudo-tag per registered program.
+            # 0x1068 marks it as a system tag (bit 12) typed as the Logix
+            # Program class (0x68) — pycomm3 picks this out of the browse
+            # before its system-tag filter via its `name.startswith("Program:")`
+            # check and records the pseudo-instance in `plc.info['programs']`.
+            for p in self._tags.all_programs:
+                source.append(Tag(
+                    instance_id=p.pseudo_instance,
+                    name=f"Program:{p.name}",
+                    symbol_type=0x1068,
+                    tag_type=0x1068,
+                    element_size=0,
+                    element_count=1,
+                ))
+
         # pycomm3 (and Studio 5000) resumes pagination by sending
         # instance_id = last_seen + 1 and expects THAT instance to be the first
         # one in the next page.  Filtering with `> start_instance` drops the
         # exact tag the client asked for; use >= here.
-        sorted_tags = [t for t in sorted(self._tags.all_tags, key=lambda t: t.instance_id)
+        sorted_tags = [t for t in sorted(source, key=lambda t: t.instance_id)
                         if t.instance_id >= start_instance]
 
         for tag in sorted_tags:
