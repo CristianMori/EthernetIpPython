@@ -101,5 +101,63 @@ class Tag:
         for cb in self.on_value_changed:
             cb(self, info)
 
+    # --- CIP SHORT_STRING (atomic 0xDA) helpers ---
+    #
+    # SHORT_STRING is distinct from the Logix STRING UDT (a structure).
+    # Each element occupies SHORT_STRING_STORAGE_SIZE bytes:
+    #   [len:USINT][chars:ASCII...]
+
+    @property
+    def is_sstring(self) -> bool:
+        """True if this tag holds CIP SHORT_STRING (0xDA)."""
+        return (self.tag_type & 0x00FF) == 0xDA
+
+    def read_sstring(self, element_index: int = 0) -> str:
+        """Decode a SHORT_STRING element to a Python str."""
+        if not self.is_sstring:
+            raise ValueError(
+                f"Tag '{self.name}' is not SHORT_STRING (type=0x{self.tag_type:04X})."
+            )
+        if not 0 <= element_index < self.element_count:
+            raise IndexError(f"element_index {element_index} out of range")
+        offset = element_index * self.element_size
+        length = self._data[offset]
+        return bytes(self._data[offset + 1:offset + 1 + length]).decode('ascii')
+
+    def write_sstring(self, value: str, element_index: int = 0) -> None:
+        """Encode a Python str into a SHORT_STRING element.  ASCII only;
+        at most SHORT_STRING_MAX_LENGTH characters.  Trailing capacity is
+        zeroed so shorter writes do not carry garbage."""
+        from . import data_types as _dt  # local import to avoid cycle at module load
+        if not self.is_sstring:
+            raise ValueError(
+                f"Tag '{self.name}' is not SHORT_STRING (type=0x{self.tag_type:04X})."
+            )
+        if not 0 <= element_index < self.element_count:
+            raise IndexError(f"element_index {element_index} out of range")
+        if value is None:
+            raise ValueError("value must not be None")
+        if len(value) > _dt.SHORT_STRING_MAX_LENGTH:
+            raise ValueError(
+                f"Value length {len(value)} exceeds SHORT_STRING max of "
+                f"{_dt.SHORT_STRING_MAX_LENGTH}."
+            )
+        for ch in value:
+            if ord(ch) > 0x7F:
+                raise ValueError(
+                    f"SHORT_STRING only accepts ASCII (U+00..U+7F); got U+{ord(ch):04X}."
+                )
+
+        offset = element_index * self.element_size
+        encoded = value.encode('ascii')
+        self._data[offset] = len(encoded)
+        self._data[offset + 1:offset + 1 + len(encoded)] = encoded
+        # Zero the trailing unused capacity.
+        tail = offset + 1 + len(encoded)
+        end = offset + self.element_size
+        if tail < end:
+            self._data[tail:end] = b'\x00' * (end - tail)
+        self._fire_changed(offset, self.element_size)
+
     def __repr__(self) -> str:
         return f"{self.name} ({self.element_count}x{self.element_size}B, type=0x{self.tag_type:04X})"

@@ -72,37 +72,66 @@ def handle_write_tag(tag: Tag, service_code: int, data: bytes,
     return CipServiceResponse.success(service_code)
 
 
-def handle_read_tag_fragmented(tag: Tag, service_code: int, data: bytes) -> CipServiceResponse:
+def handle_read_tag_fragmented(tag: Tag, service_code: int, data: bytes,
+                                element_offset: int = 0) -> CipServiceResponse:
+    """Read Tag Fragmented (0x52).
+
+    ``element_offset`` indexes into the tag's array when the request path
+    carried an element segment (Symbol Object instance + element); the
+    resulting absolute offset is
+    ``element_offset * tag.element_size + byte_offset``, mirroring the
+    atomic :func:`handle_read_tag` variant.
+    """
     if len(data) < 6:
         return CipServiceResponse.error(service_code, CipStatus.error(0x13))
 
     element_count = struct.unpack_from('<H', data, 0)[0]
-    byte_offset = struct.unpack_from('<I', data, 2)[0]
+    byte_offset_in_elements = struct.unpack_from('<I', data, 2)[0]
 
+    base_offset = element_offset * tag.element_size
     total = element_count * tag.element_size
-    if byte_offset >= total:
+    if byte_offset_in_elements >= total:
         return CipServiceResponse.error(service_code, CipStatus.error(0xFF, 0x2105))
 
-    remaining = total - byte_offset
+    absolute_offset = base_offset + byte_offset_in_elements
+    if absolute_offset >= tag.data_size:
+        return CipServiceResponse.error(service_code, CipStatus.error(0xFF, 0x2105))
+
+    remaining = min(total - byte_offset_in_elements, tag.data_size - absolute_offset)
     chunk = min(remaining, MAX_REPLY_DATA - 2)
-    more = byte_offset + chunk < total
+    more = byte_offset_in_elements + chunk < total
 
-    return _build_read_response(tag, service_code, byte_offset, chunk, partial=more)
+    return _build_read_response(tag, service_code, absolute_offset, chunk, partial=more)
 
 
-def handle_write_tag_fragmented(tag: Tag, service_code: int, data: bytes) -> CipServiceResponse:
+def handle_write_tag_fragmented(tag: Tag, service_code: int, data: bytes,
+                                 element_offset: int = 0) -> CipServiceResponse:
+    """Write Tag Fragmented (0x53).
+
+    ``element_offset`` indexes into the tag's array when the request path
+    carried an element segment; the resulting absolute offset is
+    ``element_offset * tag.element_size + byte_offset``, mirroring the
+    atomic :func:`handle_write_tag` variant.
+    """
     if len(data) < 8:
         return CipServiceResponse.error(service_code, CipStatus.error(0x13))
 
     tag_type = struct.unpack_from('<H', data, 0)[0]
     element_count = struct.unpack_from('<H', data, 2)[0]
-    byte_offset = struct.unpack_from('<I', data, 4)[0]
+    byte_offset_in_elements = struct.unpack_from('<I', data, 4)[0]
 
     if tag_type != tag.tag_type:
         return CipServiceResponse.error(service_code, CipStatus.error(0xFF, 0x2107))
 
+    base_offset = element_offset * tag.element_size
+    total = element_count * tag.element_size
     write_data = data[8:]
-    tag.set_data(write_data, byte_offset)
+    if byte_offset_in_elements + len(write_data) > total:
+        return CipServiceResponse.error(service_code, CipStatus.error(0xFF, 0x2104))
+    if base_offset + byte_offset_in_elements + len(write_data) > tag.data_size:
+        return CipServiceResponse.error(service_code, CipStatus.error(0xFF, 0x2105))
+
+    tag.set_data(write_data, base_offset + byte_offset_in_elements)
     return CipServiceResponse.success(service_code)
 
 

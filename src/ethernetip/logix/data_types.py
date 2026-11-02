@@ -32,6 +32,20 @@ WORD = 0x00D2
 DWORD = 0x00D3
 LWORD = 0x00D4
 
+# CIP SHORT_STRING (Vol 1 §C-6.3): one USINT length byte followed by ASCII
+# characters.  Distinct from CIP STRING (0xD0, UINT length) and from the
+# predefined Logix STRING UDT (structure with LEN:DINT + DATA:SINT[82]).
+# Logix controllers do not expose application tags as SHORT_STRING, but a
+# Logix-shaped symbol service can serve one — Identity attribute 7
+# (Product Name) is the typical place SHORT_STRING appears.
+SHORT_STRING = 0x00DA
+
+# Maximum character count for a SHORT_STRING tag in this server.
+SHORT_STRING_MAX_LENGTH = 80
+
+# SHORT_STRING storage size: 1 length byte + SHORT_STRING_MAX_LENGTH chars.
+SHORT_STRING_STORAGE_SIZE = 1 + SHORT_STRING_MAX_LENGTH
+
 # Logix STRING structure layout
 STRING_STRUCTURE_SIZE = 88
 STRING_LEN_OFFSET = 0
@@ -47,6 +61,7 @@ def get_element_size(tag_type: int) -> int:
         0xC6: 1, 0xC7: 2, 0xC8: 4, 0xC9: 8,
         0xCA: 4, 0xCB: 8,
         0xD1: 1, 0xD2: 2, 0xD3: 4, 0xD4: 8,
+        0xDA: SHORT_STRING_STORAGE_SIZE,  # SHORT_STRING (1 len byte + chars)
     }.get(base_type, -1)
 
 
