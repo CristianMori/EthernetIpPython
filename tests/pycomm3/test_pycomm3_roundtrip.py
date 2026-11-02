@@ -131,6 +131,41 @@ async def _spawn_server(port: int) -> tuple[EipAdapter, asyncio.Task]:
     struct.pack_into("<i", buf, 8, 42)
     motor_a.set_data(bytes(buf))
     tags.add_struct_tag("MotorArr", motor_tpl, element_count=3)
+
+    # TIMER / COUNTER / CONTROL / AOI-backing proof: all four are "just UDTs"
+    # from pycomm3's perspective — same access pattern as Motor.*, same
+    # Template Object plumbing.  Register a Logix-shape TIMER (EN, TT, DN,
+    # PRE, ACC) and an AOI-shape UDT and seed them so the test can prove
+    # MyTimer.PRE / MyTimer.EN / MyAOI.Enable all round-trip.
+    timer_tpl = tags.add_template(
+        "TIMER",
+        TemplateMember("EN", dt.BOOL),
+        TemplateMember("TT", dt.BOOL),
+        TemplateMember("DN", dt.BOOL),
+        TemplateMember("PRE", dt.DINT),
+        TemplateMember("ACC", dt.DINT),
+    )
+    my_timer = tags.add_struct_tag("MyTimer", timer_tpl)
+    buf = bytearray(timer_tpl.structure_size)
+    buf[0] = 1              # EN = True
+    struct.pack_into("<i", buf, timer_tpl.members[3].byte_offset, 1000)  # PRE
+    struct.pack_into("<i", buf, timer_tpl.members[4].byte_offset, 250)   # ACC
+    my_timer.set_data(bytes(buf))
+
+    aoi_tpl = tags.add_template(
+        "MixerAOI",
+        TemplateMember("Enable", dt.BOOL),
+        TemplateMember("Setpoint", dt.REAL),
+        TemplateMember("Done", dt.BOOL),
+        TemplateMember("Steps", dt.DINT),
+    )
+    my_aoi = tags.add_struct_tag("MyAOI", aoi_tpl)
+    buf = bytearray(aoi_tpl.structure_size)
+    buf[aoi_tpl.members[0].byte_offset] = 1  # Enable = True
+    struct.pack_into("<f", buf, aoi_tpl.members[1].byte_offset, 42.5)
+    buf[aoi_tpl.members[2].byte_offset] = 0  # Done = False
+    struct.pack_into("<i", buf, aoi_tpl.members[3].byte_offset, 7)
+    my_aoi.set_data(bytes(buf))
     # ----------------------------------------------------------------------
 
     dispatcher = LogixDispatcher(tags=tags, identity=identity)
@@ -282,6 +317,28 @@ def _pycomm3_worker(port: int, out: dict) -> None:
             r = plc.read("MotorArr[1].Speed")
             check("31 MotorArr[1].Speed", not w.error and not r.error and abs(r.value - 7.77) < 1e-4,
                   {"w": w.error, "r": r.error, "val": r.value})
+
+            # TIMER UDT — same access pattern as a user UDT; this is just an
+            # explicit witness that `MyTimer.PRE` and `MyTimer.EN` work.
+            r = plc.read("MyTimer.PRE")
+            check("TIMER MyTimer.PRE read", not r.error and r.value == 1000, {"err": r.error, "val": r.value})
+            r = plc.read("MyTimer.EN")
+            check("TIMER MyTimer.EN read", not r.error and bool(r.value) is True, {"err": r.error, "val": r.value})
+            w = plc.write(("MyTimer.PRE", 2000)); r = plc.read("MyTimer.PRE")
+            check("TIMER MyTimer.PRE write", not w.error and r.value == 2000, {"w": w.error, "back": r.value})
+            w = plc.write(("MyTimer.EN", False)); r = plc.read("MyTimer.EN")
+            check("TIMER MyTimer.EN write", not w.error and bool(r.value) is False, {"w": w.error, "back": r.value})
+
+            # AOI-backing UDT — same mechanism, confirming AOI tags are not
+            # special on the wire.
+            r = plc.read("MyAOI.Enable")
+            check("AOI MyAOI.Enable read", not r.error and bool(r.value) is True, {"err": r.error, "val": r.value})
+            r = plc.read("MyAOI.Setpoint")
+            check("AOI MyAOI.Setpoint read", not r.error and abs(r.value - 42.5) < 1e-5, {"err": r.error, "val": r.value})
+            w = plc.write(("MyAOI.Setpoint", 99.9)); r = plc.read("MyAOI.Setpoint")
+            check("AOI MyAOI.Setpoint write", not w.error and abs(r.value - 99.9) < 1e-5, {"w": w.error, "back": r.value})
+            w = plc.write(("MyAOI.Enable", False)); r = plc.read("MyAOI.Enable")
+            check("AOI MyAOI.Enable write", not w.error and bool(r.value) is False, {"w": w.error, "back": r.value})
 
             # Row 39-40: multi-service batch read & write
             batch = plc.read("DintArr[0]", "DintArr[1]", "DintArr[2]")
