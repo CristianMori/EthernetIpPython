@@ -16,6 +16,20 @@ class EncapsulationCommand(IntEnum):
     SEND_RR_DATA = 0x006F
     SEND_UNIT_DATA = 0x0070
 
+    @classmethod
+    def _missing_(cls, value):
+        # Preserve unknown command bytes as pseudo-members instead of
+        # raising ValueError, so EncapsulationHeader.parse does not kill
+        # the TCP peer on an unknown command. The dispatcher's generic
+        # EncapsulationMessage branch then replies with INVALID_COMMAND,
+        # matching spec-conformant encapsulation behavior.
+        if isinstance(value, int) and 0 <= value <= 0xFFFF:
+            pseudo = int.__new__(cls, value)
+            pseudo._name_ = f'UNKNOWN_{value:#06x}'
+            pseudo._value_ = value
+            return pseudo
+        return None
+
 
 class EncapsulationStatus(IntEnum):
     SUCCESS = 0x0000
@@ -25,6 +39,19 @@ class EncapsulationStatus(IntEnum):
     INVALID_SESSION_HANDLE = 0x0064
     INVALID_LENGTH = 0x0065
     UNSUPPORTED_PROTOCOL_VERSION = 0x0069
+
+    @classmethod
+    def _missing_(cls, value):
+        # Mirror EncapsulationCommand: unknown status words must not kill
+        # the parse. They can only appear on inbound replies if a peer
+        # misbehaves, and the right response is to log and continue, not
+        # to tear down the TCP socket.
+        if isinstance(value, int) and 0 <= value <= 0xFFFFFFFF:
+            pseudo = int.__new__(cls, value)
+            pseudo._name_ = f'UNKNOWN_{value:#010x}'
+            pseudo._value_ = value
+            return pseudo
+        return None
 
 
 # Struct format: command(H) + length(H) + session(I) + status(I) + context(Q) + options(I) = 24 bytes
