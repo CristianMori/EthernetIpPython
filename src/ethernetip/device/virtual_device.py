@@ -81,7 +81,6 @@ class VirtualDevice:
 
         self._udp = EipUdpTransport(bind_address=self.bind_address, bind_port=udp_port)
         self._udp.on_data_received.append(self._on_udp_data_received)
-        self._udp.on_data_received_with_sender.append(self._on_udp_data_with_sender)
         await self._udp.start()
 
     async def close(self) -> None:
@@ -236,10 +235,24 @@ class VirtualDevice:
         except asyncio.CancelledError:
             pass
 
-    def _on_udp_data_received(self, connection_id: int, data: bytes) -> None:
+    def _on_udp_data_received(self, connection_id: int, data: bytes,
+                               sender: tuple[str, int]) -> None:
         conn = self.connection_manager.find_by_ot_id(connection_id)
         if conn is None or conn.state != ConnectionState.ESTABLISHED:
             return
+
+        # Authenticate the sender host against the Forward_Open originator
+        # BEFORE touching any per-connection state. Only the ephemeral port
+        # is allowed to drift (NAT rebind, re-bind on the originator);
+        # packets from a different IP are dropped so a LAN peer that guesses
+        # our ot_id cannot hijack the T→O endpoint or inject consumer data.
+        if conn.originator_host is not None and sender[0] != conn.originator_host:
+            return
+
+        # Sender passed the host check — track its (possibly drifted) port.
+        if conn.remote_endpoint is None or conn.remote_endpoint[1] != sender[1]:
+            conn.remote_endpoint = sender
+            self.on_remote_endpoint_updated(conn, sender)
 
         conn.last_received_utc = datetime.now(timezone.utc)
         if not conn.first_received:
@@ -264,20 +277,6 @@ class VirtualDevice:
         asm = self.assemblies.get_assembly(conn.consumed_assembly_instance)
         if asm:
             asm.set_data(io_data)
-
-    def _on_udp_data_with_sender(self, connection_id: int, sender: tuple[str, int]) -> None:
-        conn = self.connection_manager.find_by_ot_id(connection_id)
-        if conn is None or conn.state != ConnectionState.ESTABLISHED:
-            return
-        # Authenticate the sender host against the Forward_Open originator.
-        # Only the ephemeral port is allowed to drift (NAT rebind, re-bind
-        # on the originator); packets from a different IP are dropped so a
-        # LAN peer that guesses our ot_id cannot hijack the T→O endpoint.
-        if conn.originator_host is not None and sender[0] != conn.originator_host:
-            return
-        if conn.remote_endpoint is None or conn.remote_endpoint[1] != sender[1]:
-            conn.remote_endpoint = sender
-            self.on_remote_endpoint_updated(conn, sender)
 
     def on_remote_endpoint_updated(self, conn: IoConnection, sender: tuple[str, int]) -> None:
         """Override in subclasses to propagate the originator's UDP endpoint

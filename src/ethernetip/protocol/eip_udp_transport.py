@@ -20,10 +20,12 @@ class EipUdpTransport:
         self._protocol: _UdpProtocol | None = None
         self.actual_port: int = bind_port
 
-        # Callbacks: (connection_id, data)
-        self.on_data_received: list[Callable[[int, bytes], None]] = []
-        # Callbacks: (connection_id, (host, port))
-        self.on_data_received_with_sender: list[Callable[[int, tuple[str, int]], None]] = []
+        # Callbacks: (connection_id, data, sender)
+        # Sender is always supplied so handlers can authenticate the source
+        # host BEFORE writing any per-connection state (consumer assembly,
+        # last_received_utc, first_received). Callbacks that don't need
+        # sender simply ignore the arg.
+        self.on_data_received: list[Callable[[int, bytes, tuple[str, int]], None]] = []
 
     async def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         loop = loop or asyncio.get_running_loop()
@@ -94,9 +96,7 @@ class EipUdpTransport:
         io_data = data[offset:offset + data_len]
 
         for cb in self.on_data_received:
-            cb(connection_id, io_data)
-        for cb in self.on_data_received_with_sender:
-            cb(connection_id, addr)
+            cb(connection_id, io_data, addr)
 
 
 class _UdpProtocol(asyncio.DatagramProtocol):

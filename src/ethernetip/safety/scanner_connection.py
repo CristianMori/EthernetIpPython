@@ -297,7 +297,8 @@ class SafetyScannerConnection:
                 f"run={run_idle} ts={timestamp}")
         self._server_encap_seq += 1
 
-    def _on_udp_data(self, connection_id: int, data: bytes) -> None:
+    def _on_udp_data(self, connection_id: int, data: bytes,
+                     _sender: tuple[str, int]) -> None:
         if not self.is_open:
             return
         if connection_id == self._server_to_id:

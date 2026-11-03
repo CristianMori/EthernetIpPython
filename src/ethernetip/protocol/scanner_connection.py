@@ -82,7 +82,8 @@ class ScannerConnection:
                                self._encap_seq_num, bytes(io_data))
         self.send_count += 1
 
-    def _on_udp_data(self, connection_id: int, data: bytes) -> None:
+    def _on_udp_data(self, connection_id: int, data: bytes,
+                     _sender: tuple[str, int]) -> None:
         if connection_id != self.to_connection_id or not self.is_open:
             return
 
