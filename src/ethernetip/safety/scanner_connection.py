@@ -419,40 +419,52 @@ class SafetyScannerConnection:
         # Extended-Format CRC depends on it. Seed from 0 (the 0xFFFF "cold
         # start" sentinel some targets echo in their app reply does NOT mean
         # rollover=0xFFFF — they start their producer at rollover=0).
+        #
+        # Compute the CANDIDATE rollover + last_ts locally; don't mutate
+        # state until the CRC verifies. Otherwise a tampered or corrupt
+        # frame drifts our rollover away from the target's, poisoning the
+        # CRC seed for subsequent legitimate frames, and also triggers a
+        # TCOO on a bogus ping change.
         incoming_ts = extract_timestamp(data, data_len, self._format)
         if not self._tgt_rollover_initialized:
-            self._tgt_rollover_count = 0
-            self._tgt_last_ts = incoming_ts
-            self._tgt_rollover_initialized = True
+            cand_rollover = 0
+            cand_initialized = True
         else:
-            # Raw int subtraction (matches C# `int delta = ushort - ushort`)
-            # — a wrap shows as a large-magnitude negative value.
+            cand_rollover = self._tgt_rollover_count
             delta = incoming_ts - self._tgt_last_ts
             if delta < -0x4000:
-                self._tgt_rollover_count = (self._tgt_rollover_count + 1) & 0xFFFF
-            self._tgt_last_ts = incoming_ts
+                cand_rollover = (cand_rollover + 1) & 0xFFFF
+            cand_initialized = True
 
         result = decode_safety_frame(
             data, data_len, self._format,
             self._tgt_pid_seed_s1, self._tgt_pid_seed_s3, self._tgt_pid_seed_s5,
-            self._tgt_rollover_count)
+            cand_rollover)
 
         mode_byte = data[data_len] if data_len < len(data) else 0
         target_ping = mode_byte & 0x03
         target_run = (mode_byte & 0x80) != 0
 
+        if not result.crc_valid:
+            # Don't commit rollover state, don't ack a ping, don't call
+            # the data handler. The frame didn't happen.
+            self._log_msg(f"RX CRC FAIL: {result.error_message}")
+            return
+
+        # CRC good — commit the candidate rollover state.
+        self._tgt_rollover_count = cand_rollover
+        self._tgt_last_ts = incoming_ts
+        self._tgt_rollover_initialized = cand_initialized
+
         if self._last_target_ping == 0xFF or target_ping != self._last_target_ping:
             self._last_target_ping = target_ping
             self._send_client_tcoo(target_ping)
 
-        if result.crc_valid:
-            for cb in self.on_data_received:
-                cb(bytes(result.actual_data))
-            self._log_msg(
-                f"RX data=[{result.actual_data.hex(' ')}] mode=0x{mode_byte:02X} "
-                f"run={target_run} ping={target_ping} ts={result.timestamp}")
-        else:
-            self._log_msg(f"RX CRC FAIL: {result.error_message}")
+        for cb in self.on_data_received:
+            cb(bytes(result.actual_data))
+        self._log_msg(
+            f"RX data=[{result.actual_data.hex(' ')}] mode=0x{mode_byte:02X} "
+            f"run={target_run} ping={target_ping} ts={result.timestamp}")
 
     def _send_client_tcoo(self, ping_count_reply: int) -> None:
         if self._target_endpoint is None:
