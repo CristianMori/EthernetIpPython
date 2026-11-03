@@ -473,8 +473,16 @@ class IoEipAdapter(EipAdapter):
     Skips the Sockaddr items for Class 3 explicit FwdOpens (those don't use
     UDP, and Logix MSG rejects the reply with extended status 0x0205)."""
 
-    def __init__(self, dispatch, identity: IdentityInfo, sessions=None, identity_source=None):
-        super().__init__(dispatch, identity, sessions, identity_source)
+    def __init__(self, dispatch, identity: IdentityInfo, sessions=None, identity_source=None,
+                 max_connections: int = 64,
+                 max_sessions_per_connection: int = 4,
+                 idle_timeout: float = 60.0):
+        super().__init__(
+            dispatch, identity, sessions, identity_source,
+            max_connections=max_connections,
+            max_sessions_per_connection=max_sessions_per_connection,
+            idle_timeout=idle_timeout,
+        )
         self.udp_port: int = IO_PORT
         # Callbacks fired on successful FwdOpen: (CipServiceResponse, (host, port)).
         self.on_connection_opened: list[Callable[[CipServiceResponse, tuple[str, int]], None]] = []
