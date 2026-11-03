@@ -123,8 +123,11 @@ class EipAdapter:
             # before this coroutine returns. Without the drain, a flood
             # of rejected connects piles up socket objects awaiting
             # close in the loop and defeats the point of the cap.
+            # Bound the wait: a hostile peer that refuses to ACK the FIN
+            # would otherwise park this coroutine forever (coroutine leak;
+            # the kernel will still release the fd on its own schedule).
             try:
-                await writer.wait_closed()
+                await asyncio.wait_for(writer.wait_closed(), timeout=5.0)
             except Exception:
                 pass
             return
