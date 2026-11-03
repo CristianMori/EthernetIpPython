@@ -5,6 +5,7 @@ import asyncio
 import logging
 import struct
 import socket
+import time
 from typing import Callable
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,13 @@ from ..connections.connection_manager import (
 )
 
 DEFAULT_PORT = 44818
+
+# Hard ceiling on how long a single encapsulation frame may take to arrive
+# in full. Bounds the "slow-loris" shape where a peer drips one byte every
+# `idle_timeout - ε` seconds: the per-chunk read timeout resets on each
+# byte, but the frame-assembly budget does not, so the socket closes once
+# the accumulator stays non-empty past this horizon.
+FRAME_ASSEMBLY_TIMEOUT = 10.0
 
 
 class EipAdapter:
@@ -124,6 +132,11 @@ class EipAdapter:
         sockname = writer.get_extra_info('sockname', ('0.0.0.0', 0))
         local_addr = sockname[0]
         accum = bytearray()
+        # Monotonic timestamp of the first byte of the current partial
+        # frame. None whenever `accum` is empty. Enforces an upper bound
+        # on frame assembly so byte-drip attacks cannot park a socket
+        # indefinitely by sending one byte before every idle_timeout.
+        frame_start: float | None = None
 
         owner_token = bind_tcp_owner_tracker(owned_connections)
         try:
@@ -139,7 +152,16 @@ class EipAdapter:
                     break
                 if not chunk:
                     break
+                if not accum:
+                    frame_start = time.monotonic()
                 accum.extend(chunk)
+                # Reject slow-drip assembly: idle_timeout resets per read,
+                # so the only guard against one-byte-per-interval drips
+                # is a wall-clock budget on the frame itself.
+                if frame_start is not None and \
+                        time.monotonic() - frame_start > FRAME_ASSEMBLY_TIMEOUT:
+                    logger.debug("frame-assembly timeout from %r", peername)
+                    break
 
                 # Drain as many complete frames as we have buffered.
                 while True:
@@ -158,6 +180,10 @@ class EipAdapter:
                     # error reply instead of silently killing the task.
                     raw_header = bytes(accum[:HEADER_SIZE])
                     del accum[:consumed]
+                    # Frame fully drained: the next partial frame starts
+                    # a fresh assembly budget.
+                    if not accum:
+                        frame_start = None
 
                     # Cap sessions per TCP connection. SessionManager has no
                     # per-connection accounting, so a peer that spams
