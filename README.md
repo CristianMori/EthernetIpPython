@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/cm-ethernetip)](https://pypi.org/project/cm-ethernetip/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-<!-- TODO: publish 0.2.0 to PyPI. pyproject.toml is 0.2.0; the published release is 0.1.0, so the badge shows 0.1.0 until then. -->
+<!-- TODO: publish 0.3.0 to PyPI. pyproject.toml is 0.3.0; the published release is 0.1.0, so the badge lags until then. -->
 
 A complete EtherNet/IP and CIP Safety protocol stack written in Python 3 (asyncio). Acts as **adapter** (target / I/O slave), **scanner** (originator / I/O master), or **Logix-compatible tag server / client** — with or without CIP Safety. Tested against real Allen-Bradley ControlLogix and CompactLogix PLCs as well as 1734 distributed safety I/O modules. Pure-Python port of [EthernetIpSharp](https://github.com/CristianMori/EthernetIpSharp); siblings [EthernetIpRust](https://github.com/CristianMori/EthernetIpRust) and [EthernetIpCpp](https://github.com/CristianMori/EthernetIpCpp) share the same architecture and are wire-compatible.
 
@@ -46,6 +46,7 @@ Arrays, UDTs, browsing, and Class 3 polling are in [Logix tag client](#logix-tag
 - [Install](#install)
 - [30-second quickstart](#30-second-quickstart)
 - [Features](#features)
+- [What's new in 0.3.0](#whats-new-in-030)
 - [Security hardening](#security-hardening)
 - [Architecture](#architecture)
 - [Project layout](#project-layout)
@@ -117,6 +118,14 @@ Arrays, UDTs, browsing, and Class 3 polling are in [Logix tag client](#logix-tag
 - Connection lifecycle events on `ConnectionManager.on_connection_established` / `on_connection_removed`
 - Per-frame send/receive counters
 - Heavy in-source comments explaining wire formats and edge cases
+
+---
+
+## What's new in 0.3.0
+
+- **Fragmented tag services are walker-aware** — Logix `Read Tag Fragmented` (0x52) and `Write Tag Fragmented` (0x53) now go through the same segment-aware path walker as the non-fragmented services, so nested UDT member paths like `Program:MainProgram.motor.counts[5]` dispatch to the right member and return the right type code even on large reads/writes that span multiple request chunks.
+- **Full atomic Logix type family** — server-side support covers every CIP Vol 1 §C-6.1 elementary type: `BOOL`, signed integers (`SINT`/`INT`/`DINT`/`LINT`), unsigned integers (`USINT`/`UINT`/`UDINT`/`ULINT`), IEEE floats (`REAL`/`LREAL`), and bit strings (`BYTE`/`WORD`/`DWORD`/`LWORD`). Each has its own on-wire type code so `Write_Tag` type checks round-trip exactly.
+- **Test suite** — 257 tests passing across CIP, protocol, Logix, and safety layers, including the hardening regression set.
 
 ---
 
