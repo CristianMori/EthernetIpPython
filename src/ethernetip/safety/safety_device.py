@@ -462,45 +462,44 @@ class SafetyDevice(VirtualDevice):
 
         # Track originator's rollover count separately from ours; the Extended
         # format CRC seed depends on it and the producer's clock can diverge
-        # from ours during startup.
+        # from ours during startup. Compute the CANDIDATE rollover and
+        # last-ts locally — don't mutate the connection state until CRC
+        # verifies, so a tampered or corrupt frame can't advance rollover
+        # (eventually desyncing the CRC seed from the producer) or trip
+        # the plc_running cold-start on the partner connection.
         incoming_ts = extract_timestamp(data, data_len, fmt)
         if not conn.safety_originator_rollover_initialized:
-            conn.safety_originator_rollover_count = conn.safety_initial_rollover_value
-            conn.safety_originator_last_ts = incoming_ts
-            conn.safety_originator_rollover_initialized = True
+            cand_rollover = conn.safety_initial_rollover_value
+            cand_initialized = True
         else:
-            # Raw int subtraction (matches C# `int delta = ushort - ushort`) —
-            # a wrap shows as a large-magnitude negative value.
+            cand_rollover = conn.safety_originator_rollover_count
             delta = incoming_ts - conn.safety_originator_last_ts
             if delta < -0x4000:
-                conn.safety_originator_rollover_count = (
-                    conn.safety_originator_rollover_count + 1) & 0xFFFF
-            conn.safety_originator_last_ts = incoming_ts
+                cand_rollover = (cand_rollover + 1) & 0xFFFF
+            cand_initialized = True
 
         result = decode_safety_frame(
             data, data_len, fmt,
             conn.safety_originator_pid_seed_s1,
             conn.safety_originator_pid_seed_s3,
             conn.safety_originator_pid_seed_s5,
-            conn.safety_originator_rollover_count)
+            cand_rollover)
 
         # IDLE frames before PLC processes our SafetyOpen response carry
         # rolloverCount=0 instead of our SafetyInitialRolloverValue. Retry
         # with 0 if the first attempt failed and the frame is idle.
         if (not result.crc_valid and data_len < len(data)
                 and (data[data_len] & 0x80) == 0
-                and conn.safety_originator_rollover_count != 0):
-            result = decode_safety_frame(
+                and cand_rollover != 0):
+            retry = decode_safety_frame(
                 data, data_len, fmt,
                 conn.safety_originator_pid_seed_s1,
                 conn.safety_originator_pid_seed_s3,
                 conn.safety_originator_pid_seed_s5,
                 0)
-
-        if result.crc_valid:
-            asm = self.assemblies.get_assembly(conn.consumed_assembly_instance)
-            if asm:
-                asm.set_data(result.actual_data)
+            if retry.crc_valid:
+                result = retry
+                cand_rollover = 0
 
         mode_byte = data[data_len] if data_len < len(data) else 0
         current_ping = mode_byte & 0x03
@@ -511,7 +510,22 @@ class SafetyDevice(VirtualDevice):
             print(f"[SU-RECV-DATA] conn={conn.connection_serial_number:04X} "
                   f"mode=0x{mode_byte:02X} ts={result.timestamp} wireTs={incoming_ts} "
                   f"crc={'OK' if result.crc_valid else 'BAD'} "
-                  f"rc=0x{conn.safety_originator_rollover_count:04X} ping={current_ping}")
+                  f"rc=0x{cand_rollover:04X} ping={current_ping}")
+
+        if not result.crc_valid:
+            # CRC failed: don't commit rollover/last_ts, don't process
+            # mode_byte (ping-change TCOO, plc_running cold-start), don't
+            # touch the consumed assembly. The frame didn't happen.
+            return
+
+        # CRC good — commit the candidate rollover state.
+        conn.safety_originator_rollover_count = cand_rollover
+        conn.safety_originator_last_ts = incoming_ts
+        conn.safety_originator_rollover_initialized = cand_initialized
+
+        asm = self.assemblies.get_assembly(conn.consumed_assembly_instance)
+        if asm:
+            asm.set_data(result.actual_data)
 
         # Ping-change → send TCOO
         if current_ping != conn.safety_last_ping_count:
