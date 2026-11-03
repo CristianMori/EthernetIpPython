@@ -57,6 +57,14 @@ class IoConnection:
 
         # Network
         self.remote_endpoint: tuple[str, int] | None = None
+        # Host of the Forward_Open originator (TCP peer address). Pinned at
+        # FwdOpen accept time and used to authenticate inbound UDP I/O
+        # datagrams: any datagram whose source IP differs from this value
+        # is dropped, which prevents a LAN peer that guesses our ot_id from
+        # hijacking the T→O stream by sending one spoofed packet. Port is
+        # intentionally not pinned so NAT rebinds / ephemeral-port rotation
+        # on the originator can still steer our output.
+        self.originator_host: str | None = None
 
         # Sequence tracking
         self.encapsulation_sequence_number: int = 0

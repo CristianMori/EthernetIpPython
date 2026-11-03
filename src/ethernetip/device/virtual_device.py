@@ -95,6 +95,9 @@ class VirtualDevice:
         for conn in self.connection_manager.active_connections:
             if conn.remote_endpoint is None:
                 conn.remote_endpoint = plc_endpoint
+                # Pin the authenticated originator host from the TCP peer so
+                # inbound UDP from any other IP cannot steer our T→O output.
+                conn.originator_host = plc_endpoint[0]
                 break
 
     def _on_connection_established(self, conn: IoConnection) -> None:
@@ -206,10 +209,17 @@ class VirtualDevice:
 
     def _on_udp_data_with_sender(self, connection_id: int, sender: tuple[str, int]) -> None:
         conn = self.connection_manager.find_by_ot_id(connection_id)
-        if conn and conn.state == ConnectionState.ESTABLISHED:
-            if conn.remote_endpoint is None or conn.remote_endpoint[1] != sender[1]:
-                conn.remote_endpoint = sender
-                self.on_remote_endpoint_updated(conn, sender)
+        if conn is None or conn.state != ConnectionState.ESTABLISHED:
+            return
+        # Authenticate the sender host against the Forward_Open originator.
+        # Only the ephemeral port is allowed to drift (NAT rebind, re-bind
+        # on the originator); packets from a different IP are dropped so a
+        # LAN peer that guesses our ot_id cannot hijack the T→O endpoint.
+        if conn.originator_host is not None and sender[0] != conn.originator_host:
+            return
+        if conn.remote_endpoint is None or conn.remote_endpoint[1] != sender[1]:
+            conn.remote_endpoint = sender
+            self.on_remote_endpoint_updated(conn, sender)
 
     def on_remote_endpoint_updated(self, conn: IoConnection, sender: tuple[str, int]) -> None:
         """Override in subclasses to propagate the originator's UDP endpoint
