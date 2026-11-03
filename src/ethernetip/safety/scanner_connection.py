@@ -113,6 +113,11 @@ class SafetyScannerConnection:
         # CID seeds for TCOO we send on client O->T
         self._cid_seed_s3 = 0
         self._cid_seed_s5 = 0
+        # Target CID seeds for validating incoming server-direction TCOO
+        # (target is CONSUMER on server conn → TCOO on T→O is seeded with
+        # target's CID = target identity + target server SV instance).
+        self._tgt_cid_seed_s3 = 0
+        self._tgt_cid_seed_s5 = 0
 
         self._run_idle = False
         self._ping_count = 0
@@ -252,6 +257,13 @@ class SafetyScannerConnection:
         conn._tgt_pid_seed_s3 = SafetyCrc.pid_cid_seed_s3(tgt_vendor, tgt_serial, cli_sv)
         conn._tgt_pid_seed_s5 = SafetyCrc.pid_cid_seed_s5(tgt_vendor, tgt_serial, cli_sv)
 
+        # Server-direction TCOO: TARGET is CONSUMER on server conn, so TCOO
+        # back on T→O is seeded with target's CID = target identity +
+        # target's SV instance on the server FwdOpen reply.
+        srv_sv = conn._server_app_reply.target_connection_serial
+        conn._tgt_cid_seed_s3 = SafetyCrc.pid_cid_seed_s3(tgt_vendor, tgt_serial, srv_sv)
+        conn._tgt_cid_seed_s5 = SafetyCrc.pid_cid_seed_s5(tgt_vendor, tgt_serial, srv_sv)
+
         # CID seeds for client O->T TCOO: our identity + our client conn serial.
         conn._cid_seed_s3 = SafetyCrc.pid_cid_seed_s3(
             orig_vendor, orig_serial, conn._client_conn_serial)
@@ -350,10 +362,50 @@ class SafetyScannerConnection:
                 f"client TO=0x{self._client_to_id:08X})")
 
     def _on_server_tcoo(self, data: bytes) -> None:
+        # Validate the TCOO's own CRC before any state transition. Without
+        # this, any 6-byte UDP that reached this handler flipped the
+        # producer into "running" mode on wire length alone. Mirror of
+        # device-side fix in 7482930: the TCOO is sent by the consumer
+        # (target on the server conn, since target consumes O->T) and is
+        # seeded with the consumer's CID — target identity + target's SV
+        # instance from the server FwdOpen reply, stored as
+        # _tgt_cid_seed_s{3,5}.
+        if not self._server_tcoo_crc_valid(data):
+            self._log_msg(f"RX TCOO CRC FAIL len={len(data)}")
+            return
         if not self._consumer_active:
             self._consumer_active = True
             self._run_idle = True
             self._log_msg(f"Consumer active — transitioning to run=1 (TCOO {len(data)}B)")
+
+    def _server_tcoo_crc_valid(self, data: bytes) -> bool:
+        """Validate a 6-byte server-direction TCOO's CRC.
+
+        Server direction: WE produce O->T, TARGET consumes and sends back
+        the TCOO. The TCOO is seeded by the CONSUMER's CID — target
+        identity + target's SV instance from the server FwdOpen reply —
+        stored as _tgt_cid_seed_s{3,5}.
+
+        Base-format TCOO (6 B):  [Ack][CTV(2)][Ack2][CRC-S3(2)]
+            CRC-S3 over Ack + CTV, seeded by target CID S3.
+        Extended-format TCOO (6 B): [Ack][CTV(2)][CRC-S5(3)]
+            CRC-S5 (no XorOut) over Ack + CTV, seeded by target CID S5.
+
+        5-byte frames are rejected — TCOO is defined as 6 bytes.
+        """
+        if len(data) != 6:
+            return False
+        ack = data[0]
+        ctv = struct.unpack_from('<H', data, 1)[0]
+        if self._format == SafetyFormat.EXTENDED:
+            s5 = SafetyCrc.compute_s5_raw(bytes([ack]), self._tgt_cid_seed_s5)
+            s5 = SafetyCrc.compute_s5_raw(struct.pack('<H', ctv), s5)
+            expected = bytes([s5 & 0xFF, (s5 >> 8) & 0xFF, (s5 >> 16) & 0xFF])
+            return bytes(data[3:6]) == expected
+        crc = SafetyCrc.compute_s3(ack, self._tgt_cid_seed_s3)
+        crc = SafetyCrc.compute_s3(ctv, crc)
+        on_wire = struct.unpack_from('<H', data, 4)[0]
+        return crc == on_wire
 
     def _on_client_data(self, data: bytes) -> None:
         wlen = len(data)
