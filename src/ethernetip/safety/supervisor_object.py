@@ -75,10 +75,14 @@ class SafetySupervisorObject:
             3, CipDataType.BYTE,
             AttributeAccess.GET_SINGLE | AttributeAccess.GET_ALL, bytes(snn_data)))
 
-        # Attribute 4: Configuration Lock (USINT) — 0 = unlocked
+        # Attribute 4: Configuration Lock (USINT) — 0 = unlocked.
+        # Read-only on the wire: writing it would let a hostile peer
+        # clear the lock via Set_Attribute_Single and bypass the gating
+        # on Safety_Reset / Propose_TUNID / Apply_TUNID. The lock is
+        # toggled by internal callers via set_configuration_lock().
         inst.add_attribute(CipAttribute.create_byte(
             4, CipDataType.USINT,
-            AttributeAccess.GET_SINGLE | AttributeAccess.SET_SINGLE | AttributeAccess.GET_ALL, 0))
+            AttributeAccess.GET_SINGLE | AttributeAccess.GET_ALL, 0))
 
         # Attribute 6: Safety Configuration Identifier (10 bytes, zeros = unconfigured)
         inst.add_attribute(CipAttribute(
@@ -140,6 +144,23 @@ class SafetySupervisorObject:
             a1.set_data(bytes([int(self.state)]))
         if a2 is not None:
             a2.set_data(bytes([int(self.mode)]))
+
+    def set_configuration_lock(self, value: int) -> None:
+        """Toggle attribute 4 (Configuration Lock) from internal callers.
+
+        Attribute 4 is read-only on the wire (no SET_SINGLE flag), so
+        operator-ack paths and future services that need to engage or
+        clear the lock go through this method instead of the generic
+        Set_Attribute_Single handler. ``value`` is coerced to a single
+        byte; non-zero engages the lock, zero clears it.
+        """
+        inst = self._cip_class.get_instance(1)
+        if inst is None:
+            return
+        a4 = inst.get_attribute(4)
+        if a4 is None:
+            return
+        a4.set_data(bytes([int(value) & 0xFF]))
 
     def _is_configuration_locked(self, instance: CipInstance) -> bool:
         """Attribute 4 (Configuration Lock) non-zero → mutating services
