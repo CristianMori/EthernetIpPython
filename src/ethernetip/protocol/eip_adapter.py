@@ -119,6 +119,14 @@ class EipAdapter:
             logger.debug("rejecting connection: active=%d max=%d",
                          self._active_connections, self.max_connections)
             writer.close()
+            # Wait for the TCP FIN to drain so the OS releases the fd
+            # before this coroutine returns. Without the drain, a flood
+            # of rejected connects piles up socket objects awaiting
+            # close in the loop and defeats the point of the cap.
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
             return
         self._active_connections += 1
 
