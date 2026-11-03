@@ -326,8 +326,18 @@ class SafetyScannerConnection:
         self._server_encap_seq += 1
 
     def _on_udp_data(self, connection_id: int, data: bytes,
-                     _sender: tuple[str, int]) -> None:
+                     sender: tuple[str, int]) -> None:
         if not self.is_open:
+            return
+        # Authenticate the sender IP against the known target endpoint.
+        # Without this, any LAN peer that guesses our server/client TO ids
+        # (sequential allocator) can inject safety payloads and flip our
+        # consumer-active state or feed decoder a chosen frame. Mirrors
+        # the device-side fix in b9f65fe.
+        if self._target_endpoint is not None and sender[0] != self._target_endpoint[0]:
+            self._log_msg(
+                f"RX dropped: sender {sender[0]} != target "
+                f"{self._target_endpoint[0]} (connID=0x{connection_id:08X})")
             return
         if connection_id == self._server_to_id:
             self._on_server_tcoo(data)
