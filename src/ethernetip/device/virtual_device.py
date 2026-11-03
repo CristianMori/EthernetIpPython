@@ -17,6 +17,13 @@ from .identity_object import create_identity_class
 from .tcpip_interface import create_tcpip_interface_class
 from .ethernet_link import create_ethernet_link_class
 
+# Max time between a successful Forward_Open and the first inbound UDP
+# frame on the resulting connection. The CIP watchdog only arms after
+# first_received is true, and the originator picks connection_timeout_us
+# (RPI x multiplier), so a peer that holds TCP open, Forward_Opens, and
+# then never sends UDP can otherwise park an IoConnection for ~71 min.
+FORWARD_OPEN_FIRST_UDP_TIMEOUT = 30.0
+
 
 class VirtualDevice:
     """A fully composed simulated EtherNet/IP device."""
@@ -34,6 +41,9 @@ class VirtualDevice:
         self._udp: EipUdpTransport | None = None
         self._production_tasks: dict[int, asyncio.Task] = {}
         self._watchdog_tasks: dict[int, asyncio.Task] = {}
+        # Per-connection "awaiting first UDP" timers; cancelled on the
+        # first inbound UDP frame or at connection teardown.
+        self._first_udp_timers: dict[int, asyncio.Task] = {}
 
         # Wire up assembly validation
         self.connection_manager.validate_assembly = lambda inst_id: (
@@ -75,7 +85,11 @@ class VirtualDevice:
         await self._udp.start()
 
     async def close(self) -> None:
-        for task in list(self._production_tasks.values()) + list(self._watchdog_tasks.values()):
+        for task in (
+            list(self._production_tasks.values())
+            + list(self._watchdog_tasks.values())
+            + list(self._first_udp_timers.values())
+        ):
             task.cancel()
             try:
                 await task
@@ -126,14 +140,37 @@ class VirtualDevice:
             task = asyncio.ensure_future(self._watchdog_loop(conn))
             self._watchdog_tasks[conn.ot_connection_id] = task
 
+        # Guard against the "TCP open, Forward_Open, never produce UDP"
+        # shape. The CIP watchdog only arms after first_received flips,
+        # so without this timer such a connection would stay pinned for
+        # up to the originator-picked connection_timeout_us (~71 min at
+        # the spec max). Only arm it on connections that actually expect
+        # inbound UDP, i.e. ones consuming an assembly.
+        if conn.consumed_assembly_instance != 0:
+            timer = asyncio.ensure_future(self._first_udp_timeout(conn))
+            self._first_udp_timers[conn.ot_connection_id] = timer
+
     def _on_connection_removed(self, conn: IoConnection) -> None:
-        # Cancel-and-pop both dicts so a connection that is torn down
-        # (Forward_Close, TCP drop, or watchdog) does not leave behind an
-        # orphaned entry nor an orphaned coroutine.
-        for store in (self._production_tasks, self._watchdog_tasks):
+        # Cancel-and-pop all three dicts so a connection that is torn
+        # down (Forward_Close, TCP drop, watchdog, or first-UDP timeout)
+        # does not leave behind an orphaned entry or an orphaned
+        # coroutine.
+        for store in (self._production_tasks, self._watchdog_tasks,
+                      self._first_udp_timers):
             task = store.pop(conn.ot_connection_id, None)
             if task is not None and not task.done():
                 task.cancel()
+
+    async def _first_udp_timeout(self, conn: IoConnection) -> None:
+        try:
+            await asyncio.sleep(FORWARD_OPEN_FIRST_UDP_TIMEOUT)
+        except asyncio.CancelledError:
+            return
+        # If the UDP side received a frame in the meantime, first_received
+        # is True and the CIP watchdog is now authoritative — leave the
+        # connection alone. Otherwise tear it down as a failed open.
+        if conn.state == ConnectionState.ESTABLISHED and not conn.first_received:
+            self.connection_manager.timeout_connection(conn)
 
     def on_connection_ready(self, conn: IoConnection) -> None:
         """Override in subclasses to run code right after a new connection
@@ -205,7 +242,14 @@ class VirtualDevice:
             return
 
         conn.last_received_utc = datetime.now(timezone.utc)
-        conn.first_received = True
+        if not conn.first_received:
+            conn.first_received = True
+            # First UDP: cancel the Forward_Open awaiting-first-UDP timer
+            # if one is still armed, so it doesn't fire later and tear
+            # down a connection that is actually running.
+            timer = self._first_udp_timers.pop(connection_id, None)
+            if timer is not None and not timer.done():
+                timer.cancel()
         self.handle_received_io_data(conn, data)
 
     def handle_received_io_data(self, conn: IoConnection, data: bytes) -> None:
