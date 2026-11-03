@@ -13,6 +13,13 @@ from ..cip.dispatcher import (
 
 SERVICE_CODE = 0x0A
 
+# Service_Count is a UINT (up to 65535). Dispatching ~32k synchronous
+# sub-requests per frame blocks the asyncio event loop for seconds and
+# a peer can repeat it per connection; the sub-request-depth cap
+# (fb8f9cf) only limits nesting, not breadth. pycomm3 batches at ~10,
+# so 20 leaves ample headroom for legitimate scanners.
+MAX_SERVICE_COUNT = 20
+
 
 def handle_multi_service(dispatch, request: CipServiceRequest) -> CipServiceResponse:
     if len(request.data) < 2:
@@ -20,6 +27,14 @@ def handle_multi_service(dispatch, request: CipServiceRequest) -> CipServiceResp
 
     data = request.data
     service_count = struct.unpack_from('<H', data, 0)[0]
+
+    # Reject the whole MSP if the peer asked for more sub-services than
+    # we're willing to dispatch in one shot. 0x15 (TOO_MUCH_DATA) matches
+    # the semantic — too many requests packed into one frame — and keeps
+    # the response small enough to fit the error envelope.
+    if service_count > MAX_SERVICE_COUNT:
+        return CipServiceResponse.error(request.service_code, CipStatus.error(0x15))
+
     header_size = 2 + service_count * 2
 
     if len(data) < header_size:
@@ -33,9 +48,18 @@ def handle_multi_service(dispatch, request: CipServiceRequest) -> CipServiceResp
     for i in range(service_count):
         start = offsets[i]
         end = offsets[i + 1] if i + 1 < service_count else len(data)
-        sub_data = data[start:end]
+        # Guard against bogus offsets. The previous code silently returned
+        # an empty slice (and a benign 0x04 path-segment error) when the
+        # offset ran past end-of-buffer or ran backwards; tighten this so
+        # the response reflects a real decode failure instead of a
+        # misleading success envelope.
+        if start > len(data) or end > len(data) or end < start:
+            result = None
+            sub_data = b''
+        else:
+            sub_data = data[start:end]
+            result = mr_codec.try_parse_request(sub_data)
 
-        result = mr_codec.try_parse_request(sub_data)
         if result is None:
             resp = CipServiceResponse.error(0, CipStatus.error(0x04))
         else:
