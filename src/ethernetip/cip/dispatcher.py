@@ -61,6 +61,28 @@ class CipDispatcher:
     def registered_classes(self) -> dict[int, CipClass]:
         return self._classes
 
+    async def dispatch_async(self, service_code: int, path: CipPath,
+                             data: bytes) -> CipServiceResponse:
+        """Async entry point for the TCP server. The base implementation
+        just defers to the sync dispatch so every non-MSP service keeps
+        its existing synchronous handler. Multiple_Service_Packet (0x0A)
+        reaches the yielding driver here so a well-formed batch at the
+        MAX_SERVICE_COUNT cap doesn't block concurrent peers while the
+        gateway chews through 20 synchronous sub-dispatches. Any other
+        service — including MSP on an unregistered path — falls through
+        to the sync path, where the normal service-table lookup produces
+        the right error."""
+        if service_code == 0x0A:
+            cip_class = self._classes.get(path.class_id) if path.class_id is not None else None
+            instance_id = path.instance_id if path.instance_id is not None else 0
+            if cip_class is not None and cip_class.get_service(0x0A, instance_id == 0) is not None \
+                    and cip_class.get_instance(instance_id) is not None:
+                from ..logix.multi_service import handle_multi_service_async
+                request = CipServiceRequest(
+                    service_code=service_code, path=path, data=data)
+                return await handle_multi_service_async(self, request)
+        return self.dispatch(service_code, path, data)
+
     def dispatch(self, service_code: int, path: CipPath, data: bytes) -> CipServiceResponse:
         # No class in path — delegate to subclass (symbolic tag dispatch).
         if path.class_id is None:

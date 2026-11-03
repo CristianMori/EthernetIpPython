@@ -197,7 +197,7 @@ class EipAdapter:
                             hdr.sender_context, EncapsulationStatus.INSUFFICIENT_MEMORY)
                     else:
                         try:
-                            response = self._dispatch_message(msg, session_handle, local_addr)
+                            response = await self._dispatch_message(msg, session_handle, local_addr)
                         except Exception:
                             # Any parse / struct / decode error raised deep in a
                             # handler (UnicodeDecodeError from a 0x91 symbolic
@@ -247,8 +247,13 @@ class EipAdapter:
             writer.close()
             self._active_connections -= 1
 
-    def _dispatch_message(self, msg: IMessage, session_handle: int, local_addr: str) -> bytes | None:
-        """Route a parsed message to its handler. Returns response bytes or None."""
+    async def _dispatch_message(self, msg: IMessage, session_handle: int, local_addr: str) -> bytes | None:
+        """Route a parsed message to its handler. Returns response bytes or None.
+
+        The SendRRData / SendUnitData branches go through the dispatcher's
+        async entry point so Multiple_Service_Packet yields to the event
+        loop between sub-dispatches; every other branch stays synchronous.
+        """
         if isinstance(msg, NopMessage):
             return None
         if isinstance(msg, ListIdentityMessage):
@@ -261,9 +266,9 @@ class EipAdapter:
             self._sessions.unregister(msg.session_handle)
             return None
         if isinstance(msg, SendRRDataMessage):
-            return self._handle_send_rr_data(msg, session_handle, local_addr)
+            return await self._handle_send_rr_data(msg, session_handle, local_addr)
         if isinstance(msg, SendUnitDataMessage):
-            return self._handle_send_unit_data(msg, session_handle)
+            return await self._handle_send_unit_data(msg, session_handle)
         if isinstance(msg, EncapsulationMessage):
             return _build_error_response(msg.header.command, msg.header.session_handle,
                                          msg.header.sender_context,
@@ -321,8 +326,8 @@ class EipAdapter:
         )
         return reply.to_bytes()
 
-    def _handle_send_rr_data(self, msg: SendRRDataMessage, session_handle: int,
-                              local_addr: str) -> bytes:
+    async def _handle_send_rr_data(self, msg: SendRRDataMessage, session_handle: int,
+                                    local_addr: str) -> bytes:
         if session_handle == 0 or not self._sessions.is_valid(msg.session_handle):
             return _build_error_response(EncapsulationCommand.SEND_RR_DATA,
                                          msg.session_handle, msg.sender_context,
@@ -335,7 +340,7 @@ class EipAdapter:
                                          EncapsulationStatus.INCORRECT_DATA)
 
         service_code, path, data = result
-        cip_response = self._dispatch.dispatch(service_code, path, data)
+        cip_response = await self._dispatch.dispatch_async(service_code, path, data)
 
         # Encode MR response
         mr_buf = bytearray(4096)
@@ -364,7 +369,7 @@ class EipAdapter:
         return _build_response(EncapsulationCommand.SEND_RR_DATA,
                                session_handle, msg.sender_context, bytes(response_payload))
 
-    def _handle_send_unit_data(self, msg: SendUnitDataMessage, session_handle: int) -> bytes:
+    async def _handle_send_unit_data(self, msg: SendUnitDataMessage, session_handle: int) -> bytes:
         """Connected explicit messaging (Class 3). After a Forward Open opens
         a Class 3 connection, the scanner uses SendUnitData (0x70) — not
         SendRRData — for every subsequent CIP request. Without this handler
@@ -388,7 +393,7 @@ class EipAdapter:
                                          msg.session_handle, msg.sender_context,
                                          EncapsulationStatus.INCORRECT_DATA)
         service_code, path, data = result
-        cip_response = self._dispatch.dispatch(service_code, path, data)
+        cip_response = await self._dispatch.dispatch_async(service_code, path, data)
 
         mr_buf = bytearray(4096)
         mr_len = cip_response.encode(mr_buf)

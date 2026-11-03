@@ -1,5 +1,6 @@
 """Multiple Service Packet (0x0A) — batch multiple CIP requests."""
 
+import asyncio
 import struct
 from ..cip.service import CipServiceRequest, CipServiceResponse
 from ..cip.status import CipStatus
@@ -21,7 +22,14 @@ SERVICE_CODE = 0x0A
 MAX_SERVICE_COUNT = 20
 
 
-def handle_multi_service(dispatch, request: CipServiceRequest) -> CipServiceResponse:
+def _iter_multi_service(dispatch, request: CipServiceRequest):
+    """Generator that executes the MSP body one sub-dispatch at a time.
+
+    Yields once after each sub-dispatch so an async driver can hand the
+    event loop back between calls. The aggregate CipServiceResponse is
+    returned via StopIteration.value — early header errors return before
+    any yield, so a sync driver that just drains next() still sees them.
+    """
     if len(request.data) < 2:
         return CipServiceResponse.error(request.service_code, CipStatus.error(0x13))
 
@@ -83,6 +91,10 @@ def handle_multi_service(dispatch, request: CipServiceRequest) -> CipServiceResp
         n = resp.encode(buf)
         encoded_responses.append(bytes(buf[:n]))
 
+        # Hand control back to the async driver (if any) so another
+        # connection task can make progress even inside the breadth cap.
+        yield
+
     # Build aggregate response
     resp_header_size = 2 + service_count * 2
     total_size = resp_header_size + sum(len(r) for r in encoded_responses)
@@ -96,3 +108,39 @@ def handle_multi_service(dispatch, request: CipServiceRequest) -> CipServiceResp
         resp_offset += len(encoded)
 
     return CipServiceResponse.success(request.service_code, bytes(resp_buf))
+
+
+def handle_multi_service(dispatch, request: CipServiceRequest) -> CipServiceResponse:
+    """Sync driver — processes every sub-dispatch back-to-back.
+
+    Retained so the CipServiceDefinition registered on the Message Router
+    stays a plain callable; the service-dispatch chain is synchronous and
+    making it async would ripple into every class handler.
+    """
+    gen = _iter_multi_service(dispatch, request)
+    try:
+        while True:
+            next(gen)
+    except StopIteration as stop:
+        return stop.value
+
+
+async def handle_multi_service_async(
+        dispatch, request: CipServiceRequest) -> CipServiceResponse:
+    """Async driver — awaits ``asyncio.sleep(0)`` between each sub-dispatch.
+
+    The breadth cap (MAX_SERVICE_COUNT) already bounds how long a single
+    MSP can monopolise the event loop, but a 20-call burst of synchronous
+    tag reads still starves peer connections for the duration. Yielding
+    between sub-dispatches lets concurrent clients interleave requests
+    without raising the cap. Callers reach this path through
+    ``CipDispatcher.dispatch_async`` so non-MSP services keep running
+    through the plain sync dispatch.
+    """
+    gen = _iter_multi_service(dispatch, request)
+    try:
+        while True:
+            next(gen)
+            await asyncio.sleep(0)
+    except StopIteration as stop:
+        return stop.value
