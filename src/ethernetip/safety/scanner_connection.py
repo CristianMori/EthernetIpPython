@@ -30,6 +30,24 @@ def _now_ns() -> int:
     return time.perf_counter_ns()
 
 
+class SafetyProtocolError(Exception):
+    """Raised when a safety Forward_Open reply or safety datagram is
+    structurally malformed on the wire (e.g. the target responds
+    "success" but with a reply shorter than the Forward_Open-reply
+    header the scanner needs to decode). Separate from RuntimeError —
+    used for truncated-reply detection where ``struct.unpack_from`` /
+    index access would otherwise raise a generic struct.error or
+    IndexError that gives the caller no safety-specific signal."""
+
+
+# Minimum FwdOpen reply length the scanner needs to safely decode its
+# fixed header before touching the Application Reply:
+#   OT_connection_id(4) + TO_connection_id(4) + connection_serial(2) +
+#   originator_vendor(2) + originator_serial(4) + OT_api(4) + TO_api(4) +
+#   app_reply_size_words(1) + reserved(1) = 26 bytes.
+_FWDOPEN_REPLY_HEADER_SIZE = 26
+
+
 @dataclass
 class SafetyAppReply:
     """Parsed safety Application Reply from a FwdOpen response."""
@@ -159,6 +177,11 @@ class SafetyScannerConnection:
                 f"ES=0x{ext:04X}")
 
         srd = srv_resp.data
+        if len(srd) < _FWDOPEN_REPLY_HEADER_SIZE:
+            raise SafetyProtocolError(
+                f"Target returned truncated server FwdOpen reply: "
+                f"{len(srd)} bytes, need {_FWDOPEN_REPLY_HEADER_SIZE} "
+                "for the fixed header")
         conn._server_ot_id = struct.unpack_from('<I', srd, 0)[0]
         conn._server_to_id = struct.unpack_from('<I', srd, 4)[0]
         app_reply_words = srd[24]
@@ -197,6 +220,11 @@ class SafetyScannerConnection:
                 f"ES=0x{ext:04X}")
 
         crd = cli_resp.data
+        if len(crd) < _FWDOPEN_REPLY_HEADER_SIZE:
+            raise SafetyProtocolError(
+                f"Target returned truncated client FwdOpen reply: "
+                f"{len(crd)} bytes, need {_FWDOPEN_REPLY_HEADER_SIZE} "
+                "for the fixed header")
         conn._client_ot_id = struct.unpack_from('<I', crd, 0)[0]
         conn._client_to_id = struct.unpack_from('<I', crd, 4)[0]
         cli_app_words = crd[24]
