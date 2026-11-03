@@ -44,13 +44,18 @@ class SafetyValidatorInstance:
     crc_errors: int = 0
 
     def advance_timestamp(self, increment: int) -> None:
-        """Advance the 128µs timestamp. Wraps at 0xFFFF and bumps rollover."""
-        nxt = self.timestamp + increment
-        if nxt > 0xFFFF:
-            self.rollover_count = (self.rollover_count + 1) & 0xFFFF
-            self.timestamp = nxt & 0xFFFF
-        else:
-            self.timestamp = nxt
+        """Advance the 128µs timestamp. Wraps at 0xFFFF and bumps rollover.
+
+        An increment larger than 0x10000 (possible when a slow consumer
+        catches up after a long pause) spans multiple 16-bit wraps. Count
+        every wrap, not just the first — otherwise rollover undercounts
+        and the Extended-format CRC seed drifts away from the producer's.
+        """
+        total = self.timestamp + increment
+        wraps = total // 0x10000
+        if wraps:
+            self.rollover_count = (self.rollover_count + wraps) & 0xFFFF
+        self.timestamp = total & 0xFFFF
 
 
 class SafetyValidatorObject:
