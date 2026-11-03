@@ -308,3 +308,93 @@ def handle_write_tag_at(tag: Tag, service_code: int, data: bytes,
 
     tag.set_data(data[header_len:header_len + bytes_to_write], walked.offset)
     return CipServiceResponse.success(service_code)
+
+
+def handle_read_tag_fragmented_at(tag: Tag, service_code: int, data: bytes,
+                                   walked: WalkResult) -> CipServiceResponse:
+    """Read Tag Fragmented (0x52) on a walker-member target.
+
+    Mirrors :func:`handle_read_tag_fragmented` but anchors the read at
+    ``walked.offset`` (absolute into the root tag buffer, already including
+    nested-member traversal and any element indices) and uses
+    ``walked.element_size`` / ``walked.type_code`` for the walked member
+    rather than the root tag's. The reply's structure handle, when the
+    walker ends on a struct member, comes from ``walked.template.struct_handle``.
+    """
+    # BOOL bit members have no fragmented form — a single bit is one byte
+    # on the wire and fits an atomic read; reject so the client falls back.
+    if walked.bit_pos is not None:
+        return CipServiceResponse.error(service_code, CipStatus.error(0xFF, 0x2105))
+
+    if len(data) < 6:
+        return CipServiceResponse.error(service_code, CipStatus.error(0x13))
+
+    element_count = struct.unpack_from('<H', data, 0)[0]
+    byte_offset_in_elements = struct.unpack_from('<I', data, 2)[0]
+
+    base_offset = walked.offset
+    total = element_count * walked.element_size
+    if byte_offset_in_elements >= total:
+        return CipServiceResponse.error(service_code, CipStatus.error(0xFF, 0x2105))
+
+    absolute_offset = base_offset + byte_offset_in_elements
+    if absolute_offset >= tag.data_size:
+        return CipServiceResponse.error(service_code, CipStatus.error(0xFF, 0x2105))
+
+    as_struct = walked.template is not None
+    prefix_len = 4 if as_struct else 2
+    handle = walked.template.struct_handle if as_struct else None
+
+    remaining = min(total - byte_offset_in_elements, tag.data_size - absolute_offset)
+    chunk = min(remaining, MAX_REPLY_DATA - prefix_len)
+    more = byte_offset_in_elements + chunk < total
+
+    return _build_read_response(tag, service_code, absolute_offset, chunk,
+                                partial=more, type_code=walked.type_code,
+                                as_struct=as_struct, struct_handle=handle)
+
+
+def handle_write_tag_fragmented_at(tag: Tag, service_code: int, data: bytes,
+                                    walked: WalkResult) -> CipServiceResponse:
+    """Write Tag Fragmented (0x53) on a walker-member target.
+
+    Mirrors :func:`handle_write_tag_fragmented` but validates the request's
+    type / structure-handle header against ``walked.type_code`` and
+    ``walked.template.struct_handle`` for the walked member, and writes at
+    ``walked.offset`` rather than the root tag's byte 0.
+    """
+    if walked.bit_pos is not None:
+        return CipServiceResponse.error(service_code, CipStatus.error(0xFF, 0x2105))
+
+    if len(data) < 8:
+        return CipServiceResponse.error(service_code, CipStatus.error(0x13))
+
+    tag_type = struct.unpack_from('<H', data, 0)[0]
+    as_struct = walked.template is not None
+
+    if as_struct:
+        if len(data) < 10:
+            return CipServiceResponse.error(service_code, CipStatus.error(0x13))
+        struct_handle = struct.unpack_from('<H', data, 2)[0]
+        element_count = struct.unpack_from('<H', data, 4)[0]
+        byte_offset_in_elements = struct.unpack_from('<I', data, 6)[0]
+        header_len = 10
+        if tag_type != STRUCT_TYPE_INDICATOR or struct_handle != walked.template.struct_handle:
+            return CipServiceResponse.error(service_code, CipStatus.error(0xFF, 0x2107))
+    else:
+        element_count = struct.unpack_from('<H', data, 2)[0]
+        byte_offset_in_elements = struct.unpack_from('<I', data, 4)[0]
+        header_len = 8
+        if tag_type != walked.type_code:
+            return CipServiceResponse.error(service_code, CipStatus.error(0xFF, 0x2107))
+
+    base_offset = walked.offset
+    total = element_count * walked.element_size
+    write_data = data[header_len:]
+    if byte_offset_in_elements + len(write_data) > total:
+        return CipServiceResponse.error(service_code, CipStatus.error(0xFF, 0x2104))
+    if base_offset + byte_offset_in_elements + len(write_data) > tag.data_size:
+        return CipServiceResponse.error(service_code, CipStatus.error(0xFF, 0x2105))
+
+    tag.set_data(write_data, base_offset + byte_offset_in_elements)
+    return CipServiceResponse.success(service_code)
