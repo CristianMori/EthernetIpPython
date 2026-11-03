@@ -364,6 +364,14 @@ class SafetyDevice(VirtualDevice):
 
         # TCOO from PLC consumer
         if wire_len in (5, 6):
+            # Validate the TCOO's own CRC before any state transition. Without
+            # this, any 5/6-byte UDP that reached this handler could flip the
+            # producer into "running" mode. Sender-IP authentication guards
+            # the socket; checking the CRC here means a corrupt or spoofed
+            # frame that still clears that check can't move the state machine
+            # on wire-length alone.
+            if not _tcoo_crc_valid(data, conn):
+                return
             if not conn.safety_consumer_active:
                 conn.safety_consumer_active = True
                 conn.safety_timestamp = conn.safety_initial_timestamp
@@ -564,6 +572,40 @@ class SafetyDevice(VirtualDevice):
                 a25 = sv_inst.get_attribute(25)
                 if a25 is not None:
                     a25.set_data(bytes(UniqueNetworkId.SIZE))
+
+def _tcoo_crc_valid(data: bytes, conn: IoConnection) -> bool:
+    """Validate a 6-byte TCOO's CRC against the originator's seed.
+
+    Base-format TCOO wire layout:
+        [AckByte] [CTV(2)] [AckByte2] [CRC-S3(2)]
+    CRC-S3 is computed over AckByte + CTV seeded with the originator's
+    S3 seed (same formula the originator uses on the sending side —
+    the originator's identity + its connection serial, which the device
+    stores as safety_originator_pid_seed_s3).
+
+    Extended-format TCOO wire layout:
+        [AckByte] [CTV(2)] [CRC-S5(3)]
+    CRC-S5 is computed over AckByte + CTV seeded with the originator's
+    raw (no-XorOut) S5 seed.
+
+    The spec defines TCOO as 6 bytes in both formats; 5-byte frames
+    have no defined CRC coverage and are rejected.
+    """
+    if len(data) != 6:
+        return False
+    ack = data[0]
+    ctv = struct.unpack_from('<H', data, 1)[0]
+    if conn.safety_format == 0x02:
+        s5 = SafetyCrc.compute_s5_raw(bytes([ack]), conn.safety_originator_pid_seed_s5)
+        s5 = SafetyCrc.compute_s5_raw(struct.pack('<H', ctv), s5)
+        expected = bytes([s5 & 0xFF, (s5 >> 8) & 0xFF, (s5 >> 16) & 0xFF])
+        return bytes(data[3:6]) == expected
+    # Base format.
+    crc = SafetyCrc.compute_s3(ack, conn.safety_originator_pid_seed_s3)
+    crc = SafetyCrc.compute_s3(ctv, crc)
+    on_wire = struct.unpack_from('<H', data, 4)[0]
+    return crc == on_wire
+
 
 def _estimate_data_length(wire_size_in: int) -> int:
     """Reverse the wire_size table to derive the safety payload length."""
