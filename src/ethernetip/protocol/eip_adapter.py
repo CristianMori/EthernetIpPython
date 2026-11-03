@@ -195,6 +195,17 @@ class EipAdapter:
                         response = _build_error_response(
                             hdr.command, hdr.session_handle,
                             hdr.sender_context, EncapsulationStatus.INSUFFICIENT_MEMORY)
+                    elif isinstance(msg, UnregisterSessionMessage) and \
+                            msg.session_handle not in session_handles:
+                        # Cross-socket UnregisterSession: a peer must not be
+                        # able to tear down a session that was registered on
+                        # a different TCP socket. Without this guard, any
+                        # peer that guesses or probes session handles can
+                        # silently kill another peer's session.
+                        hdr = EncapsulationHeader.parse(raw_header)
+                        response = _build_error_response(
+                            hdr.command, hdr.session_handle,
+                            hdr.sender_context, EncapsulationStatus.INVALID_SESSION_HANDLE)
                     else:
                         try:
                             response = await self._dispatch_message(msg, session_handle, local_addr)
