@@ -86,6 +86,57 @@ async def test_cross_socket_unregister_cannot_kill_victim():
         await adapter.close()
 
 
+def _send_rr_data_frame(handle: int, cip_data: bytes) -> bytes:
+    """Minimal SendRRData frame with a NullAddress + UnconnectedData CPF."""
+    # CPF: count(2) + NullAddress(type 0x0000 + len 0x0000) + UnconnectedData(0x00B2 + len + data)
+    cpf = struct.pack('<HHH', 2, 0x0000, 0x0000) + struct.pack('<HH', 0x00B2, len(cip_data)) + cip_data
+    # SendRRData payload = InterfaceHandle(4) + Timeout(2) + CPF
+    payload = struct.pack('<IH', 0, 5) + cpf
+    hdr = EncapsulationHeader(
+        command=EncapsulationCommand.SEND_RR_DATA,
+        length=len(payload),
+        session_handle=handle,
+    )
+    return hdr.to_bytes() + payload
+
+
+@pytest.mark.asyncio
+async def test_cross_socket_send_rr_data_rejected():
+    """SendRRData with a session handle registered on another TCP socket
+    must be rejected with INVALID_SESSION_HANDLE — not quietly serviced
+    through the shared SessionManager."""
+    adapter = _make_adapter()
+    await adapter.listen('127.0.0.1', 0)
+    try:
+        victim = EipScanner()
+        await victim.connect('127.0.0.1', adapter.port)
+        victim_handle = victim.session_handle
+
+        # Attacker opens its own socket, registers its own session, then
+        # swaps in the victim's handle on a SendRRData.
+        attacker = EipScanner()
+        await attacker.connect('127.0.0.1', adapter.port)
+        reader, writer = attacker._reader, attacker._writer
+
+        # GetAttributeSingle on Identity attr 1 — a request we know works
+        # on this adapter when sent with a valid same-socket handle.
+        path = bytes([0x20, 0x01, 0x24, 0x01, 0x30, 0x01])
+        inner_mr = bytes([0x0E, len(path) // 2]) + path
+        writer.write(_send_rr_data_frame(victim_handle, inner_mr))
+        await writer.drain()
+        resp = await asyncio.wait_for(reader.readexactly(HEADER_SIZE), timeout=1.0)
+        parsed = EncapsulationHeader.parse(resp)
+        assert parsed.command == EncapsulationCommand.SEND_RR_DATA
+        assert parsed.status == EncapsulationStatus.INVALID_SESSION_HANDLE, (
+            f"expected INVALID_SESSION_HANDLE, got {parsed.status!r}"
+        )
+
+        await attacker.close()
+        await victim.close()
+    finally:
+        await adapter.close()
+
+
 @pytest.mark.asyncio
 async def test_same_socket_unregister_still_works():
     """A peer unregistering ITS OWN session handle must still succeed

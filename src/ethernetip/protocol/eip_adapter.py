@@ -208,7 +208,8 @@ class EipAdapter:
                             hdr.sender_context, EncapsulationStatus.INVALID_SESSION_HANDLE)
                     else:
                         try:
-                            response = await self._dispatch_message(msg, session_handle, local_addr)
+                            response = await self._dispatch_message(
+                                msg, session_handle, local_addr, session_handles)
                         except Exception:
                             # Any parse / struct / decode error raised deep in a
                             # handler (UnicodeDecodeError from a 0x91 symbolic
@@ -258,8 +259,15 @@ class EipAdapter:
             writer.close()
             self._active_connections -= 1
 
-    async def _dispatch_message(self, msg: IMessage, session_handle: int, local_addr: str) -> bytes | None:
+    async def _dispatch_message(self, msg: IMessage, session_handle: int, local_addr: str,
+                                 session_handles: list[int] | None = None) -> bytes | None:
         """Route a parsed message to its handler. Returns response bytes or None.
+
+        `session_handles` is the per-socket set of handles the caller
+        registered on this TCP connection; data frames whose header
+        session_handle is not in that set must be rejected with
+        INVALID_SESSION_HANDLE. Omitting it (or passing None) preserves
+        legacy global-pool semantics for callers outside the adapter.
 
         The SendRRData / SendUnitData branches go through the dispatcher's
         async entry point so Multiple_Service_Packet yields to the event
@@ -277,9 +285,11 @@ class EipAdapter:
             self._sessions.unregister(msg.session_handle)
             return None
         if isinstance(msg, SendRRDataMessage):
-            return await self._handle_send_rr_data(msg, session_handle, local_addr)
+            return await self._handle_send_rr_data(msg, session_handle, local_addr,
+                                                     session_handles)
         if isinstance(msg, SendUnitDataMessage):
-            return await self._handle_send_unit_data(msg, session_handle)
+            return await self._handle_send_unit_data(msg, session_handle,
+                                                      session_handles)
         if isinstance(msg, EncapsulationMessage):
             return _build_error_response(msg.header.command, msg.header.session_handle,
                                          msg.header.sender_context,
@@ -338,8 +348,10 @@ class EipAdapter:
         return reply.to_bytes()
 
     async def _handle_send_rr_data(self, msg: SendRRDataMessage, session_handle: int,
-                                    local_addr: str) -> bytes:
-        if session_handle == 0 or not self._sessions.is_valid(msg.session_handle):
+                                    local_addr: str,
+                                    session_handles: list[int] | None = None) -> bytes:
+        if not _session_belongs_to_socket(msg.session_handle, session_handle,
+                                           session_handles, self._sessions):
             return _build_error_response(EncapsulationCommand.SEND_RR_DATA,
                                          msg.session_handle, msg.sender_context,
                                          EncapsulationStatus.INVALID_SESSION_HANDLE)
@@ -380,7 +392,8 @@ class EipAdapter:
         return _build_response(EncapsulationCommand.SEND_RR_DATA,
                                session_handle, msg.sender_context, bytes(response_payload))
 
-    async def _handle_send_unit_data(self, msg: SendUnitDataMessage, session_handle: int) -> bytes:
+    async def _handle_send_unit_data(self, msg: SendUnitDataMessage, session_handle: int,
+                                       session_handles: list[int] | None = None) -> bytes:
         """Connected explicit messaging (Class 3). After a Forward Open opens
         a Class 3 connection, the scanner uses SendUnitData (0x70) — not
         SendRRData — for every subsequent CIP request. Without this handler
@@ -389,7 +402,8 @@ class EipAdapter:
         ConnectedData payload: sequence_count(2) + MR request. Echo the seq
         in the reply.
         """
-        if session_handle == 0 or not self._sessions.is_valid(msg.session_handle):
+        if not _session_belongs_to_socket(msg.session_handle, session_handle,
+                                           session_handles, self._sessions):
             return _build_error_response(EncapsulationCommand.SEND_UNIT_DATA,
                                          msg.session_handle, msg.sender_context,
                                          EncapsulationStatus.INVALID_SESSION_HANDLE)
@@ -496,6 +510,25 @@ def _build_response(command: EncapsulationCommand, session_handle: int,
     reply.write_to(buf)
     buf[HEADER_SIZE:] = payload
     return bytes(buf)
+
+
+def _session_belongs_to_socket(request_handle: int, current_handle: int,
+                                socket_handles: list[int] | None,
+                                sessions) -> bool:
+    """Reject session handles that were not registered on this TCP socket.
+
+    `is_valid` on the shared SessionManager only answers "has this handle
+    ever been registered"; it says nothing about who registered it. A
+    peer that guesses or probes a neighbor's handle must not be able to
+    drive SendRRData or SendUnitData through the shared pool.
+
+    If `socket_handles` is None the caller is outside the TCP adapter
+    (unit tests, loopback) and the legacy global-pool semantics apply.
+    """
+    if socket_handles is None:
+        return current_handle != 0 and sessions.is_valid(request_handle)
+    return request_handle != 0 and request_handle in socket_handles \
+        and sessions.is_valid(request_handle)
 
 
 def _build_error_response(command: EncapsulationCommand, session_handle: int,
