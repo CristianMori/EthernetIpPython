@@ -160,18 +160,25 @@ class SafetyDevice(VirtualDevice):
                 if a25 is not None:
                     a25.set_data(bytes(cfunid))
 
-                # Store SCID on attribute 6
-                scid_bytes = bytearray(SafetyConfigurationId.SIZE)
-                struct.pack_into('<I', scid_bytes, 0, seg.sccrc)
-                scid_bytes[4:10] = seg.scts
-                a6 = sv_inst.get_attribute(6)
-                if a6 is not None:
-                    a6.set_data(bytes(scid_bytes))
-
-            self._supervisor.scid = SafetyConfigurationId(
-                sccrc=seg.sccrc,
-                scts=SafetyNetworkNumber(seg.scts) if seg.scts else SafetyNetworkNumber(),
-            )
+            # SCID binding is one-time: the Rockwell supervisor records the
+            # first configuring originator's SCID, and a subsequent originator
+            # that doesn't carry one (seg.sccrc == 0) must not clear or
+            # replace it — otherwise a third originator binding by SCID
+            # match (validate_safety_open attribute-3 check) is broken.
+            # First write wins: only populate the supervisor SCID (and its
+            # mirror on attribute 6) when it's still zero.
+            if self._supervisor.scid.sccrc == 0:
+                if sv_inst is not None:
+                    scid_bytes = bytearray(SafetyConfigurationId.SIZE)
+                    struct.pack_into('<I', scid_bytes, 0, seg.sccrc)
+                    scid_bytes[4:10] = seg.scts
+                    a6 = sv_inst.get_attribute(6)
+                    if a6 is not None:
+                        a6.set_data(bytes(scid_bytes))
+                self._supervisor.scid = SafetyConfigurationId(
+                    sccrc=seg.sccrc,
+                    scts=SafetyNetworkNumber(seg.scts) if seg.scts else SafetyNetworkNumber(),
+                )
 
             # Initial_TS / Initial_Rollover_Value handling:
             # - Target PRODUCER (client direction): echo originator's values.
