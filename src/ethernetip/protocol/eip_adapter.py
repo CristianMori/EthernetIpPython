@@ -228,9 +228,18 @@ class EipAdapter:
                         session_handle = EncapsulationHeader.parse(response).session_handle
                         session_handles.append(session_handle)
                     elif isinstance(msg, UnregisterSessionMessage):
-                        if session_handle in session_handles:
-                            session_handles.remove(session_handle)
-                        session_handle = 0
+                        # Remove the handle the peer actually unregistered,
+                        # not the current one. A peer that registers multiple
+                        # handles on one socket may unregister a non-current
+                        # one; dropping `session_handle` instead leaked the
+                        # just-closed id (now invalid in SessionManager) and
+                        # orphaned the still-live current handle. Only clear
+                        # `session_handle` when the current handle itself is
+                        # the one being torn down.
+                        if msg.session_handle in session_handles:
+                            session_handles.remove(msg.session_handle)
+                        if msg.session_handle == session_handle:
+                            session_handle = 0
 
                     if response is not None:
                         writer.write(response)
