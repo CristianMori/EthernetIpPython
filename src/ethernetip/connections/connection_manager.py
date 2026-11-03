@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import contextvars
+import secrets
 import struct
 import threading
 from typing import Callable
@@ -74,7 +75,14 @@ class ConnectionManagerObject:
         self._cip_class.add_instance_service(CipServiceDefinition(UNCONNECTED_SEND_SERVICE, "Unconnected_Send", self._handle_unconnected_send))
 
         self._connections: dict[int, IoConnection] = {}
-        self._next_connection_id = 0
+        # Seed the ot_connection_id with a cryptographically random 32-bit
+        # value so an attacker who sees one assignment cannot predict the
+        # next ids and craft Forward_Close / SendUnitData frames targeting
+        # connections it did not open. The `+= 1` after seeding keeps ids
+        # locally monotonic (useful for logs) and the counter is masked to
+        # 32 bits in _process_forward_open so the ot_id stays in the UDINT
+        # range even after many allocations.
+        self._next_connection_id = secrets.randbits(32)
         self._lock = threading.Lock()
 
         # Callbacks
@@ -156,7 +164,7 @@ class ConnectionManagerObject:
             return _forward_open_error(request.service_code, 0x0113)
 
         with self._lock:
-            self._next_connection_id += 1
+            self._next_connection_id = (self._next_connection_id + 1) & 0xFFFFFFFF
             ot_id = self._next_connection_id
 
         conn = IoConnection()
