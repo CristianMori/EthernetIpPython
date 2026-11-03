@@ -2,6 +2,7 @@
 import pytest
 from ethernetip.safety.network_segment import (
     SafetyNetworkSegment, parse_safety_segment, SEGMENT_TYPE,
+    SafetySegmentFormatError,
 )
 from ethernetip.safety.types import UniqueNetworkId, SafetyNetworkNumber
 
@@ -81,3 +82,38 @@ def test_truncated_input():
     _make_target_segment().encode(out)
     with pytest.raises(ValueError):
         parse_safety_segment(bytes(out[:20]))  # truncated
+
+
+def test_short_claimed_length_for_target_format_raises_format_error():
+    """A safety segment whose own length field claims a size below the
+    target format's minimum must raise SafetySegmentFormatError before
+    the format-dependent unpacks fire. Prior behavior let unpack_from
+    walk past the end of the buffer and raised a bare struct.error,
+    which the generic encapsulation handler then surfaced as
+    encapsulation-level INCORRECT_DATA instead of a safety-CIP error."""
+    # 0x50 0x03 0x00 ..  -> format=Target (0x00), total=8 bytes.
+    # Fully present on the wire but structurally impossible: Target
+    # format needs 56 bytes.
+    buf = bytes([SEGMENT_TYPE, 0x03, 0x00, 0x00, 0, 0, 0, 0])
+    with pytest.raises(SafetySegmentFormatError):
+        parse_safety_segment(buf)
+
+
+def test_short_claimed_length_for_extended_format_raises_format_error():
+    # Extended (0x02) needs 62 bytes; here we claim 8.
+    buf = bytes([SEGMENT_TYPE, 0x03, 0x02, 0x00, 0, 0, 0, 0])
+    with pytest.raises(SafetySegmentFormatError):
+        parse_safety_segment(buf)
+
+
+def test_unknown_format_byte_raises_format_error():
+    # Any format byte we don't recognise is rejected up front.
+    buf = bytes([SEGMENT_TYPE, 0x1B, 0x7F] + [0] * 53)
+    with pytest.raises(SafetySegmentFormatError):
+        parse_safety_segment(buf)
+
+
+def test_safety_segment_format_error_is_value_error_subclass():
+    # Existing callers that catch bare ValueError must still catch the
+    # new exception.
+    assert issubclass(SafetySegmentFormatError, ValueError)

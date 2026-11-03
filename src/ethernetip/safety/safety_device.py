@@ -19,7 +19,7 @@ from .frame_codec import (
     SafetyFormat, wire_size, encode_safety_frame, decode_safety_frame,
     extract_timestamp, encode_tcoo, encode_tcoo_extended,
 )
-from .network_segment import parse_safety_segment
+from .network_segment import parse_safety_segment, SafetySegmentFormatError
 from .supervisor_object import SafetySupervisorObject
 from .types import (
     ModeByte, SafetyNetworkNumber, SafetyConfigurationId, UniqueNetworkId,
@@ -78,7 +78,18 @@ class SafetyDevice(VirtualDevice):
                               fwd_open: ForwardOpenRequest) -> int | None:
         if len(safety_segment) < 3 or safety_segment[0] != 0x50:
             return 0x080E
-        seg, _ = parse_safety_segment(safety_segment)
+        try:
+            seg, _ = parse_safety_segment(safety_segment)
+        except SafetySegmentFormatError:
+            # Malformed segment — unknown format byte or claimed length
+            # too short for the declared format. Respond at the safety
+            # layer with "safety configuration invalid" rather than let
+            # the exception surface as an encapsulation INCORRECT_DATA.
+            return 0x080E
+        except ValueError:
+            # Any other parse_safety_segment ValueError (truncated input
+            # vs claimed length, wrong leading byte). Same outcome.
+            return 0x080E
 
         # 1. TUNID must match ours
         our_tunid = bytearray(UniqueNetworkId.SIZE)

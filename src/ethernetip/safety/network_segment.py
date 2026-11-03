@@ -20,6 +20,29 @@ from .types import UniqueNetworkId
 SEGMENT_TYPE = 0x50
 
 
+# Format-specific wire sizes (whole segment, including the leading
+# [0x50][data_len_words] header). parse_safety_segment validates the
+# claimed length against these before any format-dependent unpack —
+# otherwise a crafted "0x50 0x03 0x00 ..." segment (data_len_words=3,
+# total=8) passes the generic length check but tears through unpack_from
+# at offset 4+ with a struct.error.
+_FORMAT_MIN_TOTAL = {
+    0x00: 56,  # Target format
+    0x01: 14,  # Router format
+    0x02: 62,  # Extended format
+}
+
+
+class SafetySegmentFormatError(ValueError):
+    """Raised by parse_safety_segment when the segment is well-shaped
+    enough to identify its format byte but too short / malformed to
+    satisfy that format's layout. Subclasses ValueError so existing
+    callers that catch ValueError keep working, while safety-layer
+    code can catch this specifically and return a safety-CIP error
+    (rather than letting struct.error propagate and surface as an
+    encapsulation-level INCORRECT_DATA from the generic handler)."""
+
+
 @dataclass
 class SafetyNetworkSegment:
     """Mutable so callers can build incrementally on the originator side."""
@@ -95,6 +118,21 @@ def parse_safety_segment(data: bytes) -> Tuple[SafetyNetworkSegment, int]:
 
     if len(data) < total:
         raise ValueError(f"Safety segment requires {total} bytes, got {len(data)}")
+
+    # Reject format bytes we don't know and short-for-format segments
+    # before any format-dependent unpack. The buffer-length check above
+    # only enforces the segment's own claimed length; it doesn't stop a
+    # "0x50 0x03 0x00 ..." header (data_len_words=3, total=8, format=
+    # Target) that unpack_from would walk off the end of a few lines
+    # down.
+    required = _FORMAT_MIN_TOTAL.get(format_)
+    if required is None:
+        raise SafetySegmentFormatError(
+            f"Unknown safety segment format 0x{format_:02X}")
+    if total < required:
+        raise SafetySegmentFormatError(
+            f"Safety segment format 0x{format_:02X} requires at least "
+            f"{required} bytes, claimed length is {total}")
 
     if format_ == 0x01:  # Router format
         tc_conn_id, = struct.unpack_from('<I', data, 4)
