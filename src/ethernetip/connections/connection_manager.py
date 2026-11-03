@@ -1,6 +1,7 @@
 """CIP Connection Manager Object (Class 0x06) — Forward Open/Close and Unconnected Send."""
 
 from __future__ import annotations
+import contextvars
 import struct
 import threading
 from typing import Callable
@@ -30,6 +31,25 @@ FORWARD_OPEN_SERVICE = 0x54
 FORWARD_CLOSE_SERVICE = 0x4E
 LARGE_FORWARD_OPEN_SERVICE = 0x5B
 UNCONNECTED_SEND_SERVICE = 0x52
+
+# Per-task tracker for TCP owners of IoConnections. The TCP handler sets a
+# fresh list in this context var before dispatching any CIP frame; a successful
+# Forward_Open appends the newly minted ot_id to that list so the TCP handler
+# can tear down its connections when the socket drops without a Forward_Close.
+# Default None means "no owner wants tracking" (unit tests calling dispatch
+# directly, UDP paths, etc.) and the append becomes a no-op.
+_tcp_owner_tracker: contextvars.ContextVar[list[int] | None] = contextvars.ContextVar(
+    "cip_tcp_owner_tracker", default=None)
+
+
+def bind_tcp_owner_tracker(tracker: list[int]) -> contextvars.Token:
+    """Install `tracker` as the list that will receive ot_ids of IoConnections
+    accepted during this task's dispatches. Returns a token for `unbind`."""
+    return _tcp_owner_tracker.set(tracker)
+
+
+def unbind_tcp_owner_tracker(token: contextvars.Token) -> None:
+    _tcp_owner_tracker.reset(token)
 
 
 class ConnectionManagerObject:
@@ -168,6 +188,14 @@ class ConnectionManagerObject:
                 self.safety_handler.configure_safety_connection(conn, fwd_open)
 
         self._connections[ot_id] = conn
+        # Record ownership on the TCP peer that drove this Forward_Open so the
+        # handler can reap the IoConnection if the socket drops without a
+        # Forward_Close. Peers that never send a UDP packet otherwise leave
+        # an immortal entry (the watchdog only arms after the first inbound
+        # frame), and 64 such sockets exhaust max_connections.
+        owner = _tcp_owner_tracker.get()
+        if owner is not None:
+            owner.append(ot_id)
         for cb in self.on_connection_established:
             cb(conn)
 
@@ -221,6 +249,18 @@ class ConnectionManagerObject:
 
         if found is None:
             return CipServiceResponse.error(request.service_code, CipStatus.error(0x01, 0x0107))
+
+        # Drop the ot_id from the owning TCP tracker if the Forward_Close was
+        # routed through the same socket that opened the connection. If a
+        # different socket closes it, the originating tracker still carries
+        # the ot_id — find_by_ot_id will return None at teardown and the loop
+        # will no-op. Safe either way.
+        owner = _tcp_owner_tracker.get()
+        if owner is not None:
+            try:
+                owner.remove(found.ot_connection_id)
+            except ValueError:
+                pass
 
         self.remove_connection(found)
 

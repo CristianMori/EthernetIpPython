@@ -27,6 +27,9 @@ from .messages import (
     ListIdentityMessage, ListServicesMessage, SendRRDataMessage,
     SendUnitDataMessage,
 )
+from ..connections.connection_manager import (
+    ConnectionManagerObject, bind_tcp_owner_tracker, unbind_tcp_owner_tracker,
+)
 
 DEFAULT_PORT = 44818
 
@@ -70,6 +73,14 @@ class EipAdapter:
         self.idle_timeout = idle_timeout
         self._active_connections = 0
 
+        # When wired, the handler reaps every IoConnection accepted on a
+        # given TCP peer if that peer disconnects without a Forward_Close.
+        # Required to keep max_connections meaningful: a hostile originator
+        # that opens, FwdOpens, then drops the socket would otherwise leak
+        # one slot per iteration until the cap in ConnectionManagerObject
+        # locks out legitimate scanners (status 0x0113).
+        self.connection_manager: ConnectionManagerObject | None = None
+
     async def listen(self, host: str = '0.0.0.0', port: int = DEFAULT_PORT) -> None:
         self.port = port
         self._server = await asyncio.start_server(
@@ -105,11 +116,16 @@ class EipAdapter:
 
         session_handle = 0
         session_handles: list[int] = []  # all handles registered on this socket
+        # IoConnections accepted on this socket. ConnectionManagerObject
+        # appends ot_ids here via the _tcp_owner_tracker ContextVar; the
+        # finally block reaps anything still live when the socket drops.
+        owned_connections: list[int] = []
         peername = writer.get_extra_info('peername', ('0.0.0.0', 0))
         sockname = writer.get_extra_info('sockname', ('0.0.0.0', 0))
         local_addr = sockname[0]
         accum = bytearray()
 
+        owner_token = bind_tcp_owner_tracker(owned_connections)
         try:
             while True:
                 try:
@@ -192,6 +208,16 @@ class EipAdapter:
                 self._sessions.unregister(handle)
             if session_handle != 0 and session_handle not in session_handles:
                 self._sessions.unregister(session_handle)
+            # Reap IoConnections this socket opened but never Forward_Closed.
+            # Without this the per-ConnectionManager slot cap exhausts after
+            # max_connections hit-and-run FwdOpens, locking out legitimate
+            # originators with 0x0113.
+            if self.connection_manager is not None:
+                for ot_id in owned_connections:
+                    conn = self.connection_manager.find_by_ot_id(ot_id)
+                    if conn is not None:
+                        self.connection_manager.remove_connection(conn)
+            unbind_tcp_owner_tracker(owner_token)
             writer.close()
             self._active_connections -= 1
 

@@ -56,6 +56,9 @@ class VirtualDevice:
     async def start(self, tcp_port: int = DEFAULT_PORT, udp_port: int = IO_PORT) -> None:
         self._adapter = IoEipAdapter(self.dispatcher, self.identity)
         self._adapter.udp_port = udp_port
+        # Hand the adapter a reference to the ConnectionManager so it can
+        # reap IoConnections when a TCP peer drops without a Forward_Close.
+        self._adapter.connection_manager = self.connection_manager
 
         self._adapter.on_connection_opened.append(self._on_adapter_connection_opened)
 
