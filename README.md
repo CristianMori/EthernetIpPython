@@ -46,6 +46,7 @@ Arrays, UDTs, browsing, and Class 3 polling are in [Logix tag client](#logix-tag
 - [Install](#install)
 - [30-second quickstart](#30-second-quickstart)
 - [Features](#features)
+- [Security hardening](#security-hardening)
 - [Architecture](#architecture)
 - [Project layout](#project-layout)
 - [Quick start](#quick-start)
@@ -116,6 +117,26 @@ Arrays, UDTs, browsing, and Class 3 polling are in [Logix tag client](#logix-tag
 - Connection lifecycle events on `ConnectionManager.on_connection_established` / `on_connection_removed`
 - Per-frame send/receive counters
 - Heavy in-source comments explaining wire formats and edge cases
+
+---
+
+## Security hardening
+
+Six rounds of static security audit, 30 commits applied, 257 tests passing. Both the server-side (adapter / target) and client-side (scanner) code paths were reviewed and tightened.
+
+Coverage:
+
+- CIP path parsing — bounded segment walks, malformed EPATH rejection
+- Logix tag services — including walker-aware fragmented Read/Write Tag
+- Template Object — bounded member counts and reply framing
+- Encapsulation framing — length and command-code validation ahead of payload parsing
+- Forward_Open / Forward_Close — connection-parameter validation, path and timeout bounds
+- Multiple_Service_Packet — nesting depth cap, breadth cap, async yield between sub-services
+- Connection and session resource caps — per-peer limits to bound memory under adversarial clients
+- UDP source-IP authentication for Class 0/1 I/O frames
+- CIP Safety stack — TUNID, SCCRC, and CPCRC verification on Forward_Open; rollover state committed only after a successful CRC pass; TCOO CRC gate before any state update; Configuration Lock treated as wire-read-only; symmetric hardening on the scanner side; per-session Forward_Open tracking; random connection IDs
+
+What this does and does not mean: the hardening pass closes the specific attack and correctness gaps that six rounds of static review surfaced. It does not make the library "secure" in a general sense — industrial CIP has no authentication layer on the wire, and a real deployment still needs network segmentation (VLAN / firewall / air-gapped control network) around any device that speaks CIP.
 
 ---
 
