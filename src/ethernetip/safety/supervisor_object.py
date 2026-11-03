@@ -141,8 +141,22 @@ class SafetySupervisorObject:
         if a2 is not None:
             a2.set_data(bytes([int(self.mode)]))
 
+    def _is_configuration_locked(self, instance: CipInstance) -> bool:
+        """Attribute 4 (Configuration Lock) non-zero → mutating services
+        refuse the write with Object State Conflict (0x0C). Rockwell
+        supervisors use this to freeze configuration after the final
+        safety operator-ack."""
+        a4 = instance.get_attribute(4)
+        if a4 is None:
+            return False
+        data = a4.data
+        return bool(data) and data[0] != 0
+
     def _handle_safety_reset(self, instance: CipInstance,
                               request: CipServiceRequest) -> CipServiceResponse:
+        if self._is_configuration_locked(instance):
+            return CipServiceResponse.error(request.service_code,
+                                             CipStatus.error(0x0C))
         if len(request.data) < 1:
             return CipServiceResponse.error(request.service_code,
                                              CipStatus.error(NOT_ENOUGH_DATA))
@@ -167,6 +181,9 @@ class SafetySupervisorObject:
 
     def _handle_propose_tunid(self, instance: CipInstance,
                                 request: CipServiceRequest) -> CipServiceResponse:
+        if self._is_configuration_locked(instance):
+            return CipServiceResponse.error(request.service_code,
+                                             CipStatus.error(0x0C))
         if len(request.data) < UniqueNetworkId.SIZE:
             return CipServiceResponse.error(request.service_code,
                                              CipStatus.error(NOT_ENOUGH_DATA))
@@ -179,6 +196,9 @@ class SafetySupervisorObject:
 
     def _handle_apply_tunid(self, instance: CipInstance,
                               request: CipServiceRequest) -> CipServiceResponse:
+        if self._is_configuration_locked(instance):
+            return CipServiceResponse.error(request.service_code,
+                                             CipStatus.error(0x0C))
         if len(request.data) < UniqueNetworkId.SIZE:
             return CipServiceResponse.error(request.service_code,
                                              CipStatus.error(NOT_ENOUGH_DATA))
