@@ -49,6 +49,11 @@ class VirtualDevice:
         self.dispatcher.register_class(self.connection_manager.cip_class)
 
         self.connection_manager.on_connection_established.append(self._on_connection_established)
+        # Mirror the TCP-close reaper on the ConnectionManager side: every
+        # removal (Forward_Close, TCP drop, watchdog timeout) must also tear
+        # down the production/watchdog tasks keyed on ot_connection_id, or
+        # a long-running device leaks one entry per connection cycle.
+        self.connection_manager.on_connection_removed.append(self._on_connection_removed)
 
     def add_assembly(self, instance_id: int, data_size: int, name: str | None = None) -> AssemblyInstance:
         return self.assemblies.add_instance(instance_id, data_size, name)
@@ -120,6 +125,15 @@ class VirtualDevice:
         if conn.ot_rpi > 0:
             task = asyncio.ensure_future(self._watchdog_loop(conn))
             self._watchdog_tasks[conn.ot_connection_id] = task
+
+    def _on_connection_removed(self, conn: IoConnection) -> None:
+        # Cancel-and-pop both dicts so a connection that is torn down
+        # (Forward_Close, TCP drop, or watchdog) does not leave behind an
+        # orphaned entry nor an orphaned coroutine.
+        for store in (self._production_tasks, self._watchdog_tasks):
+            task = store.pop(conn.ot_connection_id, None)
+            if task is not None and not task.done():
+                task.cancel()
 
     def on_connection_ready(self, conn: IoConnection) -> None:
         """Override in subclasses to run code right after a new connection
