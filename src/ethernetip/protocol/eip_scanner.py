@@ -114,7 +114,10 @@ class EipScanner:
             raise RuntimeError("Not connected")
 
         conn_serial = self._next_conn_serial
-        self._next_conn_serial += 1
+        # Wrap the serial at 16 bits — struct.pack_into('<H', ...) below
+        # raises after 65535 Forward_Opens without this mask. Matches the
+        # masking in open_explicit().
+        self._next_conn_serial = (self._next_conn_serial + 1) & 0xFFFF
         orig_vendor = 0x0001
         orig_serial = os.getpid() & 0xFFFFFFFF
 
