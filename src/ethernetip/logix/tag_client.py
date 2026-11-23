@@ -32,7 +32,8 @@ class TagClient:
 
     def __init__(self, host: str, port: int = EIP_PORT,
                   *, path: str | None = None,
-                  use_connected: bool = False):
+                  use_connected: bool = False,
+                  request_timeout: float | None = 5.0):
         """Connect to a Logix controller.
 
         host / port — the EtherNet/IP module's IP and TCP port (44818).
@@ -57,7 +58,13 @@ class TagClient:
         subsequent requests ride the connection via SendUnitData with no
         per-request route bytes. Faster on hot polling loops but adds a
         Forward_Open/Forward_Close exchange around the session.
+
+        request_timeout — seconds to wait for each encapsulation reply
+        (None disables the timeout). On expiry the TCP connection is torn
+        down and TimeoutError is raised; close() against a silent peer is
+        bounded by the same timeout (Forward_Close is best-effort).
         """
+        self.request_timeout = request_timeout
         self._host = host
         self._port = port
         self._reader: asyncio.StreamReader | None = None
@@ -865,7 +872,11 @@ class TagClient:
             self._writer.write(bytes(buf))
             await self._writer.drain()
 
-            resp_header_data = await self._reader.readexactly(HEADER_SIZE)
+            try:
+                resp_header_data = await asyncio.wait_for(
+                    self._reader.readexactly(HEADER_SIZE), self.request_timeout)
+            except asyncio.TimeoutError:
+                self._abort_on_timeout()
             self._last_header = EncapsulationHeader.parse(resp_header_data)
 
             if self._last_header.status != EncapsulationStatus.SUCCESS:
@@ -873,8 +884,25 @@ class TagClient:
 
             resp_payload = b''
             if self._last_header.length > 0:
-                resp_payload = await self._reader.readexactly(self._last_header.length)
+                try:
+                    resp_payload = await asyncio.wait_for(
+                        self._reader.readexactly(self._last_header.length),
+                        self.request_timeout)
+                except asyncio.TimeoutError:
+                    self._abort_on_timeout()
             return resp_payload
+
+    def _abort_on_timeout(self) -> None:
+        """Drop the TCP connection after a reply timeout (the stream is
+        desynchronised) and raise TimeoutError."""
+        self.session_handle = 0
+        self._class3_open = False
+        if self._writer:
+            self._writer.close()
+        self._reader = None
+        self._writer = None
+        raise TimeoutError(
+            f"No reply from peer within {self.request_timeout} s; connection closed")
 
 
 def _parse_route_path(path: str | None) -> bytes:
