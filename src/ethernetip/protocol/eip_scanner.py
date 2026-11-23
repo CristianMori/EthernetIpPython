@@ -23,7 +23,12 @@ from .scanner_connection import ScannerConnection
 class EipScanner:
     """EtherNet/IP client — connects to a target, registers a session, sends CIP messages."""
 
-    def __init__(self):
+    def __init__(self, request_timeout: float | None = 5.0):
+        """request_timeout — seconds to wait for each encapsulation reply
+        (None disables the timeout). On expiry the TCP connection is torn
+        down (its framing is unknown after a partial read) and TimeoutError
+        is raised."""
+        self.request_timeout = request_timeout
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._send_lock = asyncio.Lock()
@@ -381,7 +386,11 @@ class EipScanner:
             self._writer.write(bytes(buf))
             await self._writer.drain()
 
-            resp_header_data = await self._reader.readexactly(HEADER_SIZE)
+            try:
+                resp_header_data = await asyncio.wait_for(
+                    self._reader.readexactly(HEADER_SIZE), self.request_timeout)
+            except asyncio.TimeoutError:
+                await self._abort_on_timeout()
             self._last_response_header = EncapsulationHeader.parse(resp_header_data)
 
             if self._last_response_header.status != EncapsulationStatus.SUCCESS:
@@ -390,6 +399,23 @@ class EipScanner:
 
             resp_payload = b''
             if self._last_response_header.length > 0:
-                resp_payload = await self._reader.readexactly(self._last_response_header.length)
+                try:
+                    resp_payload = await asyncio.wait_for(
+                        self._reader.readexactly(self._last_response_header.length),
+                        self.request_timeout)
+                except asyncio.TimeoutError:
+                    await self._abort_on_timeout()
 
             return resp_payload
+
+    async def _abort_on_timeout(self) -> None:
+        """Drop the TCP connection after a reply timeout (the stream is
+        desynchronised) and raise TimeoutError. UNREGISTER_SESSION is not
+        attempted: the peer is not answering."""
+        self.session_handle = 0
+        if self._writer:
+            self._writer.close()
+        self._reader = None
+        self._writer = None
+        raise TimeoutError(
+            f"No reply from peer within {self.request_timeout} s; connection closed")
