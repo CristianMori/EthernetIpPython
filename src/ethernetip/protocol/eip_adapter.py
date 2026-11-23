@@ -41,6 +41,12 @@ DEFAULT_PORT = 44818
 # the accumulator stays non-empty past this horizon.
 FRAME_ASSEMBLY_TIMEOUT = 10.0
 
+# Upper bound on each phase of EipAdapter.close(): the grace period for
+# client handlers to exit after their sockets are closed, and the wait for
+# the listening server to report closed. close() never blocks much longer
+# than the sum of the phases.
+CLOSE_TIMEOUT = 2.0
+
 
 class EipAdapter:
     """EtherNet/IP TCP server — accepts connections, routes CIP messages through dispatch.
@@ -80,6 +86,11 @@ class EipAdapter:
         self.max_sessions_per_connection = max_sessions_per_connection
         self.idle_timeout = idle_timeout
         self._active_connections = 0
+        # Live per-connection handler tasks and their writers. close() uses
+        # this to tear down connected peers: since Python 3.12.1
+        # Server.wait_closed() waits for every active connection, so an
+        # idle (or chatty) client would otherwise stall shutdown.
+        self._clients: dict[asyncio.Task, asyncio.StreamWriter] = {}
 
         # When wired, the handler reaps every IoConnection accepted on a
         # given TCP peer if that peer disconnects without a Forward_Close.
@@ -101,9 +112,26 @@ class EipAdapter:
             break
 
     async def close(self) -> None:
-        if self._server:
-            self._server.close()
-            await self._server.wait_closed()
+        server = self._server
+        if server is None:
+            return
+        # Stop accepting first so no new handler can appear while we drain.
+        server.close()
+        clients = dict(self._clients)
+        for writer in clients.values():
+            writer.close()
+        if clients:
+            _, pending = await asyncio.wait(set(clients), timeout=CLOSE_TIMEOUT)
+            if pending:
+                # A handler stuck mid-dispatch: cancel it. Its finally block
+                # still runs the per-connection cleanup.
+                for task in pending:
+                    task.cancel()
+                await asyncio.wait(pending, timeout=CLOSE_TIMEOUT)
+        try:
+            await asyncio.wait_for(server.wait_closed(), timeout=CLOSE_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.debug("server.wait_closed() timed out on close")
 
     async def __aenter__(self):
         return self
@@ -132,6 +160,9 @@ class EipAdapter:
                 pass
             return
         self._active_connections += 1
+        task = asyncio.current_task()
+        if task is not None:
+            self._clients[task] = writer
 
         session_handle = 0
         session_handles: list[int] = []  # all handles registered on this socket
@@ -278,6 +309,8 @@ class EipAdapter:
             unbind_tcp_owner_tracker(owner_token)
             writer.close()
             self._active_connections -= 1
+            if task is not None:
+                self._clients.pop(task, None)
 
     async def _dispatch_message(self, msg: IMessage, session_handle: int, local_addr: str,
                                  session_handles: list[int] | None = None) -> bytes | None:
