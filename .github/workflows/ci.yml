@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.10", "3.13"]
+        include:
+          # Newest release, on one OS only.
+          - os: ubuntu-latest
+            python-version: "3.14"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package with test extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]" pycomm3 pytest-timeout
+
+      # The suites open real loopback sockets; a per-test timeout makes a hang
+      # fail that one test quickly instead of stalling the whole job.
+      - name: Run tests
+        run: python -m pytest -ra --timeout=120
