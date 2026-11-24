@@ -18,17 +18,24 @@ from .eip_adapter import DEFAULT_PORT
 from .eip_udp_transport import EipUdpTransport, IO_PORT
 from .forward_open_config import ForwardOpenConfig
 from .scanner_connection import ScannerConnection
+from .tcp_connect import open_connection_bounded
 
 
 class EipScanner:
     """EtherNet/IP client — connects to a target, registers a session, sends CIP messages."""
 
-    def __init__(self, request_timeout: float | None = 5.0):
-        """request_timeout — seconds to wait for each encapsulation reply
+    def __init__(self, request_timeout: float | None = 5.0,
+                 *, connect_timeout: float | None = 5.0):
+        """connect_timeout — seconds to wait for the TCP connect in connect()
+        (None disables). On expiry TimeoutError is raised and the scanner
+        stays not-connected; refused/unreachable still fail immediately.
+
+        request_timeout — seconds to wait for each encapsulation reply
         (None disables the timeout). On expiry the TCP connection is torn
         down (its framing is unknown after a partial read) and TimeoutError
         is raised."""
         self.request_timeout = request_timeout
+        self.connect_timeout = connect_timeout
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._send_lock = asyncio.Lock()
@@ -49,7 +56,8 @@ class EipScanner:
         return self._udp
 
     async def connect(self, host: str, port: int = DEFAULT_PORT) -> None:
-        self._reader, self._writer = await asyncio.open_connection(host, port)
+        self._reader, self._writer = await open_connection_bounded(
+            host, port, self.connect_timeout)
         sock = self._writer.get_extra_info('socket')
         self.local_endpoint = sock.getsockname()[:2]
         self.remote_endpoint = sock.getpeername()[:2]

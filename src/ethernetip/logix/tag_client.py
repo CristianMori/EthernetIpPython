@@ -23,6 +23,7 @@ from ..cip.encapsulation import (
 from ..cip.cpf import CpfItem, CpfItemType, parse_cpf, encode_cpf
 from ..cip import mr_codec
 from . import data_types as dt
+from ..protocol.tcp_connect import open_connection_bounded
 
 EIP_PORT = 44818
 
@@ -33,7 +34,8 @@ class TagClient:
     def __init__(self, host: str, port: int = EIP_PORT,
                   *, path: str | None = None,
                   use_connected: bool = False,
-                  request_timeout: float | None = 5.0):
+                  request_timeout: float | None = 5.0,
+                  connect_timeout: float | None = 5.0):
         """Connect to a Logix controller.
 
         host / port — the EtherNet/IP module's IP and TCP port (44818).
@@ -59,12 +61,17 @@ class TagClient:
         per-request route bytes. Faster on hot polling loops but adds a
         Forward_Open/Forward_Close exchange around the session.
 
+        connect_timeout — seconds to wait for the TCP connect in connect()
+        (None disables). On expiry TimeoutError is raised and the client
+        stays not-connected; refused/unreachable still fail immediately.
+
         request_timeout — seconds to wait for each encapsulation reply
         (None disables the timeout). On expiry the TCP connection is torn
         down and TimeoutError is raised; close() against a silent peer is
         bounded by the same timeout (Forward_Close is best-effort).
         """
         self.request_timeout = request_timeout
+        self.connect_timeout = connect_timeout
         self._host = host
         self._port = port
         self._reader: asyncio.StreamReader | None = None
@@ -100,7 +107,8 @@ class TagClient:
         return self._writer is not None and self.session_handle != 0
 
     async def connect(self) -> None:
-        self._reader, self._writer = await asyncio.open_connection(self._host, self._port)
+        self._reader, self._writer = await open_connection_bounded(
+            self._host, self._port, self.connect_timeout)
         self.session_handle = await self._register_session()
         if self._use_connected:
             await self._open_class3()
