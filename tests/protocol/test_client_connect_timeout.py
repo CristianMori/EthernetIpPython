@@ -13,6 +13,7 @@ from ethernetip.logix.tag_client import TagClient
 from ethernetip.protocol.eip_scanner import EipScanner
 
 TIMEOUT = 0.3
+TOL = 0.05    # asyncio timers may fire up to one clock tick early (~15.6 ms on Windows)
 
 
 @pytest.fixture
@@ -36,7 +37,7 @@ async def test_scanner_connect_times_out(hanging_connect):
     t0 = time.monotonic()
     with pytest.raises(TimeoutError, match=r"connect.*10\.0\.0\.1:44818.*0\.3"):
         await sc.connect('10.0.0.1', 44818)
-    assert TIMEOUT <= time.monotonic() - t0 < TIMEOUT + 1
+    assert TIMEOUT - TOL <= time.monotonic() - t0 < TIMEOUT + 1
     assert hanging_connect == {'started': 1, 'cancelled': 1}
     assert not sc.is_connected
     assert sc._writer is None and sc.udp is None
@@ -47,7 +48,7 @@ async def test_tag_client_connect_times_out(hanging_connect):
     t0 = time.monotonic()
     with pytest.raises(TimeoutError, match=r"connect.*10\.0\.0\.1:44818.*0\.3"):
         await tc.connect()
-    assert TIMEOUT <= time.monotonic() - t0 < TIMEOUT + 1
+    assert TIMEOUT - TOL <= time.monotonic() - t0 < TIMEOUT + 1
     assert hanging_connect == {'started': 1, 'cancelled': 1}
     assert not tc.is_connected
     assert tc._writer is None
