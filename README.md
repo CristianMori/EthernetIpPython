@@ -1,5 +1,6 @@
 # EthernetIPPython
 
+[![CI](https://github.com/CristianMori/EthernetIpPython/actions/workflows/ci.yml/badge.svg)](https://github.com/CristianMori/EthernetIpPython/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/cm-ethernetip)](https://pypi.org/project/cm-ethernetip/)
 [![Downloads](https://img.shields.io/pypi/dm/cm-ethernetip)](https://pypi.org/project/cm-ethernetip/)
 [![Python](https://img.shields.io/pypi/pyversions/cm-ethernetip)](https://pypi.org/project/cm-ethernetip/)
