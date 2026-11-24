@@ -98,6 +98,7 @@ Arrays, UDTs, browsing, and Class 3 polling are in [Logix tag client](#logix-tag
 - Opt-in Class 3 connected explicit messaging (`use_connected=True`) — opens a Forward_Open at connect time, every read/write rides `SendUnitData` instead of UCMM
 - Instance-ID cache populated transparently by `browse_tags()` so subsequent reads send a 6-byte Symbol Object segment instead of the longer ANSI symbolic name
 - `TagClient` for connecting to a real PLC and reading/writing tags by name
+- Client timeouts: `connect_timeout` (TCP connect, default 5.0 s) and `request_timeout` (each encapsulation reply, default 5.0 s) on `TagClient` and `EipScanner`; `None` disables. Expiry raises `TimeoutError`; refused/unreachable still fail immediately.
 - Logix STRING handling (88-byte UDT: LEN(DINT) + DATA(SINT[82]))
 - `EipScanner.send_generic(service, class, instance, attribute, data, route)` — idiomatic CIP request wrapper with optional `Unconnected_Send` backplane routing
 
